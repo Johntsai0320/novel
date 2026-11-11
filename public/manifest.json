@@ -1,0 +1,10 @@
+{
+  "name": "雲端書閣 · NAS 私人小說線上閱讀平台",
+  "short_name": "雲端書閣",
+  "description": "免下載線上串流閱讀私人 NAS 上的 EPUB 與 TXT 小說，支援自動簡轉繁與跨裝置閱讀進度雲端同步。",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F6F1E7",
+  "theme_color": "#9E3B24",
+  "orientation": "portrait-primary"
+}
