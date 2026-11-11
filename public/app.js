@@ -1572,21 +1572,82 @@
       const resSpan = document.getElementById('webdav-test-result');
       resSpan.textContent = '連線測試中...';
       resSpan.style.color = 'var(--text-secondary)';
+
+      const inputUrl = document.getElementById('webdav-url-input').value.trim();
+      const inputUser = document.getElementById('webdav-user-input').value.trim();
+      const inputPass = document.getElementById('webdav-pass-input').value;
+      const inputPath = document.getElementById('webdav-path-input').value.trim() || '/';
+
+      if (!inputUrl) {
+        resSpan.textContent = '❌ 請先輸入 WebDAV 伺服器網址';
+        resSpan.style.color = 'var(--accent)';
+        return;
+      }
+
+      // If NAS backend server is available, test via backend proxy
+      if (state.serverAvailable) {
+        try {
+          const payload = {
+            webdavUrl: inputUrl,
+            webdavUsername: inputUser,
+            webdavPassword: inputPass,
+            webdavBasePath: inputPath
+          };
+          const res = await apiFetch('/api/webdav/test', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+          });
+          resSpan.textContent = `✅ ${res.message}`;
+          resSpan.style.color = 'var(--success)';
+        } catch (err) {
+          resSpan.textContent = `❌ ${err.message}`;
+          resSpan.style.color = 'var(--accent)';
+        }
+        return;
+      }
+
+      // If running on static GitHub Pages without backend: test directly from browser
       try {
-        const payload = {
-          webdavUrl: document.getElementById('webdav-url-input').value.trim(),
-          webdavUsername: document.getElementById('webdav-user-input').value.trim(),
-          webdavPassword: document.getElementById('webdav-pass-input').value,
-          webdavBasePath: document.getElementById('webdav-path-input').value.trim() || '/'
+        const cleanBase = inputUrl.replace(/\/+$/, '');
+        const cleanPath = inputPath.replace(/^\/+|\/+$/g, '');
+        const targetUrl = cleanPath ? `${cleanBase}/${cleanPath}/` : `${cleanBase}/`;
+
+        const headers = {
+          Depth: '1',
+          'Content-Type': 'application/xml; charset=utf-8'
         };
-        const res = await apiFetch('/api/webdav/test', {
-          method: 'POST',
-          body: JSON.stringify(payload)
+        if (inputUser || inputPass) {
+          const token = btoa(unescape(encodeURIComponent(`${inputUser}:${inputPass === '********' ? state.webdavConfig.webdavPassword : inputPass}`)));
+          headers['Authorization'] = `Basic ${token}`;
+        }
+
+        const res = await fetch(targetUrl, {
+          method: 'PROPFIND',
+          headers
         });
-        resSpan.textContent = `✅ ${res.message}`;
-        resSpan.style.color = 'var(--success)';
+
+        if (res.ok || res.status === 207) {
+          resSpan.textContent = `✅ WebDAV 連線成功！`;
+          resSpan.style.color = 'var(--success)';
+        } else if (res.status === 405) {
+          resSpan.textContent = `❌ HTTP 405：該網址不支援 WebDAV PROPFIND。請確認 Synology WebDAV Server 套件已啟用，且埠號正確（預設 HTTP 5005 / HTTPS 5006）。`;
+          resSpan.style.color = 'var(--accent)';
+        } else if (res.status === 401 || res.status === 403) {
+          resSpan.textContent = `❌ HTTP ${res.status}：帳號或密碼錯誤，或該帳號未被授權存取 WebDAV 或此資料夾。`;
+          resSpan.style.color = 'var(--accent)';
+        } else if (res.status === 404) {
+          resSpan.textContent = `❌ HTTP 404：找不到路徑「${inputPath}」，請檢查資料夾名稱（大小寫須相符）。`;
+          resSpan.style.color = 'var(--accent)';
+        } else {
+          resSpan.textContent = `❌ HTTP ${res.status} ${res.statusText}`;
+          resSpan.style.color = 'var(--accent)';
+        }
       } catch (err) {
-        resSpan.textContent = `❌ ${err.message}`;
+        if (err.name === 'TypeError' && err.message.includes('fetch')) {
+          resSpan.textContent = `❌ 瀏覽器連線受阻（可能是 CORS 跨域限制或憑證不受信任）。建議：1. 在網址列直接打開 ${inputUrl} 確認連線並接受憑證；2. 或在 NAS 部署 Docker 容器（無跨域限制）。`;
+        } else {
+          resSpan.textContent = `❌ ${err.message}`;
+        }
         resSpan.style.color = 'var(--accent)';
       }
     });
