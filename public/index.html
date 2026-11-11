@@ -367,15 +367,14 @@
             type="url"
             id="webdav-url-input"
             class="form-input"
-            placeholder="例如：https://100.85.142.30:5006"
-            value="https://100.85.142.30:5006"
+            placeholder="例如：https://nas.your-domain.com:5006"
           />
         </div>
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
           <div class="form-group">
             <label for="webdav-user-input">WebDAV 帳號</label>
-            <input type="text" id="webdav-user-input" class="form-input" placeholder="NAS 使用者名稱" value="novel" />
+            <input type="text" id="webdav-user-input" class="form-input" placeholder="NAS 使用者名稱" />
           </div>
           <div class="form-group">
             <label for="webdav-pass-input">WebDAV 密碼</label>
@@ -384,8 +383,8 @@
         </div>
 
         <div class="form-group">
-          <label for="webdav-path-input">小說所在資料夾路徑 (會自動遞迴掃描底下如 epub20261026 等子資料夾)</label>
-          <input type="text" id="webdav-path-input" class="form-input" placeholder="例如：/WebDAV/小說" value="/WebDAV/小說" />
+          <label for="webdav-path-input">小說所在資料夾路徑</label>
+          <input type="text" id="webdav-path-input" class="form-input" placeholder="例如：/小說 或 /WebDAV/小說" value="/" />
         </div>
 
         <div style="margin-bottom: 0.5rem;">

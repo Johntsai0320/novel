@@ -51,11 +51,11 @@
     customApiUrl: localStorage.getItem(STORAGE_KEYS.CUSTOM_API) || '',
     syncKey: localStorage.getItem(STORAGE_KEYS.SYNC_KEY) || 'default',
     webdavConfig: loadLocalJson(STORAGE_KEYS.WEBDAV_CFG, {
-      enableWebdav: true,
-      webdavUrl: 'https://100.85.142.30:5006',
-      webdavUsername: 'novel',
+      enableWebdav: false,
+      webdavUrl: '',
+      webdavUsername: '',
       webdavPassword: '',
-      webdavBasePath: '/WebDAV/小說'
+      webdavBasePath: '/'
     }),
 
     books: [],
