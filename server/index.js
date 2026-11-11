@@ -18,7 +18,18 @@ const {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const NOVELS_DIR = path.resolve(process.env.NOVELS_DIR || path.join(__dirname, '..', 'novels'));
+
+// Resolve novels directory: priority: env NOVELS_DIR -> /novels (container mount) -> local ../novels
+let NOVELS_DIR = process.env.NOVELS_DIR;
+if (!NOVELS_DIR) {
+  if (fs.existsSync('/novels')) {
+    NOVELS_DIR = '/novels';
+  } else {
+    NOVELS_DIR = path.join(__dirname, '..', 'novels');
+  }
+}
+NOVELS_DIR = path.resolve(NOVELS_DIR);
+
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data'));
 
 // Ensure directories exist
