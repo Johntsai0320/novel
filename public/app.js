@@ -51,11 +51,11 @@
     customApiUrl: localStorage.getItem(STORAGE_KEYS.CUSTOM_API) || '',
     syncKey: localStorage.getItem(STORAGE_KEYS.SYNC_KEY) || 'default',
     webdavConfig: loadLocalJson(STORAGE_KEYS.WEBDAV_CFG, {
-      enableWebdav: false,
-      webdavUrl: '',
-      webdavUsername: '',
+      enableWebdav: true,
+      webdavUrl: 'https://100.85.142.30:5006',
+      webdavUsername: 'novel',
       webdavPassword: '',
-      webdavBasePath: '/'
+      webdavBasePath: '/WebDAV/小說'
     }),
 
     books: [],
@@ -351,37 +351,70 @@
   // ==========================================================================
   // 4B. Direct Browser WebDAV Client (For Pure Static GitHub Pages Mode)
   // ==========================================================================
-  function getDirectWebdavHeaders(extra = {}) {
-    const cfg = state.webdavConfig || {};
+  function getDirectWebdavHeaders(extra = {}, customCfg = null) {
+    const cfg = customCfg || state.webdavConfig || {};
     const headers = { ...extra };
     if (cfg.webdavUsername || cfg.webdavPassword) {
-      const token = btoa(unescape(encodeURIComponent(`${cfg.webdavUsername || ''}:${cfg.webdavPassword || ''}`)));
+      const token = btoa(
+        unescape(encodeURIComponent(`${cfg.webdavUsername || ''}:${cfg.webdavPassword || ''}`))
+      );
       headers['Authorization'] = `Basic ${token}`;
     }
     return headers;
   }
 
-  function buildDirectWebdavUrl(relPath = '/') {
-    const cfg = state.webdavConfig || {};
-    const base = (cfg.webdavUrl || '').replace(/\/+$/, '');
-    const basePath = (cfg.webdavBasePath || '/').replace(/^\/+|\/+$/g, '');
-    const cleanRel = relPath.replace(/^\/+/, '');
-    const combined = [basePath, cleanRel].filter(Boolean).join('/');
-    const encoded = combined
-      .split('/')
-      .map((s) => (s ? encodeURIComponent(decodeURIComponent(s)) : ''))
+  function buildDirectWebdavUrl(relPath = '/', isDirectory = false, customCfg = null) {
+    const cfg = customCfg || state.webdavConfig || {};
+    const rawUrl = (cfg.webdavUrl || '').trim();
+    const fullInputUrl = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
+    const parsed = new URL(fullInputUrl);
+    const origin = parsed.origin;
+    const urlPath = decodeURIComponent(parsed.pathname || '/').replace(/^\/+|\/+$/g, '');
+
+    const cfgBase = (cfg.webdavBasePath || '/').replace(/^\/+|\/+$/g, '');
+    const cleanRel = (relPath || '/').replace(/^\/+|\/+$/g, '');
+
+    // Avoid duplicating path if user put /WebDAV/小說 in both URL and basePath
+    let baseSegments = [];
+    if (urlPath && cfgBase) {
+      if (cfgBase.startsWith(urlPath)) {
+        baseSegments = cfgBase.split('/');
+      } else if (urlPath.startsWith(cfgBase)) {
+        baseSegments = urlPath.split('/');
+      } else {
+        baseSegments = [...urlPath.split('/'), ...cfgBase.split('/')];
+      }
+    } else if (urlPath) {
+      baseSegments = urlPath.split('/');
+    } else if (cfgBase) {
+      baseSegments = cfgBase.split('/');
+    }
+
+    const relSegments = cleanRel ? cleanRel.split('/') : [];
+    const allSegments = [...baseSegments, ...relSegments].filter(Boolean);
+
+    const encodedPath = allSegments
+      .map((s) => encodeURIComponent(decodeURIComponent(s)))
       .join('/');
-    return `${base}/${encoded}`;
+
+    let finalUrl = encodedPath ? `${origin}/${encodedPath}` : `${origin}/`;
+    if (isDirectory && !finalUrl.endsWith('/')) {
+      finalUrl += '/';
+    }
+    return finalUrl;
   }
 
-  async function listDirectWebdavBooks() {
-    const url = buildDirectWebdavUrl('/');
+  async function listDirectWebdavBooks(subPath = '/', currentDepth = 0, maxDepth = 3, customCfg = null) {
+    const url = buildDirectWebdavUrl(subPath, true, customCfg);
     const res = await fetch(url, {
       method: 'PROPFIND',
-      headers: getDirectWebdavHeaders({
-        Depth: '1',
-        'Content-Type': 'application/xml; charset=utf-8'
-      })
+      headers: getDirectWebdavHeaders(
+        {
+          Depth: '1',
+          'Content-Type': 'application/xml; charset=utf-8'
+        },
+        customCfg
+      )
     });
     if (!res.ok && res.status !== 207) {
       throw new Error(`WebDAV HTTP ${res.status}`);
@@ -389,38 +422,72 @@
     const xmlText = await res.text();
     const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
     const responses = Array.from(doc.querySelectorAll('response, *|response'));
-    const books = [];
+    let books = [];
+    const subDirs = [];
+
+    const reqUrlObj = new URL(url);
+    const reqPathClean = decodeURIComponent(reqUrlObj.pathname).replace(/\/+$/, '');
 
     responses.forEach((el, idx) => {
-      if (idx === 0) return; // Skip root collection
       const hrefEl = el.querySelector('href, *|href');
       if (!hrefEl) return;
       const decodedHref = decodeURIComponent(hrefEl.textContent.trim());
-      if (decodedHref.endsWith('/')) return;
+      const hrefPath = decodedHref.replace(/^https?:\/\/[^/]+/i, '').replace(/\/+$/, '');
 
-      const filename = decodedHref.split('/').filter(Boolean).pop() || '';
-      if (!/\.(txt|epub)$/i.test(filename)) return;
+      const isCollection =
+        el.querySelectorAll('collection, *|collection').length > 0 ||
+        decodedHref.endsWith('/');
 
-      const ext = filename.toLowerCase().endsWith('.epub') ? 'epub' : 'txt';
-      const rawTitle = filename.replace(/\.(txt|epub)$/i, '');
+      // Skip the current directory entry itself
+      if (hrefPath === reqPathClean || (idx === 0 && isCollection)) {
+        return;
+      }
+
+      const baseName = hrefPath.split('/').filter(Boolean).pop() || '';
+      if (!baseName || baseName.startsWith('.') || baseName === '@eaDir' || baseName === '#recycle') {
+        return;
+      }
+
+      const relFromRoot = [subPath.replace(/^\/+|\/+$/g, ''), baseName].filter(Boolean).join('/');
+
+      if (isCollection) {
+        if (currentDepth < maxDepth) {
+          subDirs.push(relFromRoot);
+        }
+        return;
+      }
+
+      if (!/\.(txt|epub)$/i.test(baseName)) return;
+
+      const ext = baseName.toLowerCase().endsWith('.epub') ? 'epub' : 'txt';
+      const rawTitle = baseName.replace(/\.(txt|epub)$/i, '');
       const sizeEl = el.querySelector('getcontentlength, *|getcontentlength');
       const size = sizeEl ? parseInt(sizeEl.textContent.trim(), 10) || 0 : 0;
-      const id = `webdav_direct_${btoa(unescape(encodeURIComponent(filename)))}`;
+      const id = `webdav_direct_${btoa(unescape(encodeURIComponent(relFromRoot)))}`;
+
+      const folderLabel = subPath.replace(/^\/+|\/+$/g, '') || 'WebDAV 書庫';
 
       books.push({
         id,
         source: 'webdav-direct',
-        relativePath: filename,
-        filename,
+        relativePath: relFromRoot,
+        filename: baseName,
         title: convertStr(rawTitle),
         originalTitle: rawTitle,
-        folder: 'WebDAV 書庫',
-        originalFolder: 'WebDAV 書庫',
+        folder: convertStr(folderLabel),
+        originalFolder: folderLabel,
         format: ext,
         size,
         mtime: new Date().toISOString()
       });
     });
+
+    for (const dir of subDirs) {
+      try {
+        const childBooks = await listDirectWebdavBooks(dir, currentDepth + 1, maxDepth, customCfg);
+        books = books.concat(childBooks);
+      } catch (_) {}
+    }
 
     return books;
   }
@@ -1607,36 +1674,39 @@
       }
 
       // If running on static GitHub Pages without backend: test directly from browser
+      const tempCfg = {
+        webdavUrl: inputUrl,
+        webdavUsername: inputUser,
+        webdavPassword:
+          inputPass === '********' ? state.webdavConfig.webdavPassword : inputPass,
+        webdavBasePath: inputPath
+      };
+      const targetUrl = buildDirectWebdavUrl('/', true, tempCfg);
+
       try {
-        const cleanBase = inputUrl.replace(/\/+$/, '');
-        const cleanPath = inputPath.replace(/^\/+|\/+$/g, '');
-        const targetUrl = cleanPath ? `${cleanBase}/${cleanPath}/` : `${cleanBase}/`;
-
-        const headers = {
-          Depth: '1',
-          'Content-Type': 'application/xml; charset=utf-8'
-        };
-        if (inputUser || inputPass) {
-          const token = btoa(unescape(encodeURIComponent(`${inputUser}:${inputPass === '********' ? state.webdavConfig.webdavPassword : inputPass}`)));
-          headers['Authorization'] = `Basic ${token}`;
-        }
-
         const res = await fetch(targetUrl, {
           method: 'PROPFIND',
-          headers
+          headers: getDirectWebdavHeaders(
+            {
+              Depth: '1',
+              'Content-Type': 'application/xml; charset=utf-8'
+            },
+            tempCfg
+          )
         });
 
         if (res.ok || res.status === 207) {
-          resSpan.textContent = `✅ WebDAV 連線成功！`;
+          const foundBooks = await listDirectWebdavBooks('/', 0, 2, tempCfg);
+          resSpan.textContent = `✅ WebDAV 連線成功！在「${inputPath}」及子資料夾共偵測到 ${foundBooks.length} 本小說。`;
           resSpan.style.color = 'var(--success)';
         } else if (res.status === 405) {
-          resSpan.textContent = `❌ HTTP 405：該網址不支援 WebDAV PROPFIND。請確認 Synology WebDAV Server 套件已啟用，且埠號正確（預設 HTTP 5005 / HTTPS 5006）。`;
+          resSpan.textContent = `❌ HTTP 405：目標路徑 (${targetUrl}) 不支援 PROPFIND，請確認 WebDAV Server 已啟用。`;
           resSpan.style.color = 'var(--accent)';
         } else if (res.status === 401 || res.status === 403) {
-          resSpan.textContent = `❌ HTTP ${res.status}：帳號或密碼錯誤，或該帳號未被授權存取 WebDAV 或此資料夾。`;
+          resSpan.textContent = `❌ HTTP ${res.status}：帳號或密碼錯誤，或「${inputUser}」無權限存取「${inputPath}」。`;
           resSpan.style.color = 'var(--accent)';
         } else if (res.status === 404) {
-          resSpan.textContent = `❌ HTTP 404：找不到路徑「${inputPath}」，請檢查資料夾名稱（大小寫須相符）。`;
+          resSpan.textContent = `❌ HTTP 404：找不到資料夾「${inputPath}」，請檢查路徑名稱是否正確。`;
           resSpan.style.color = 'var(--accent)';
         } else {
           resSpan.textContent = `❌ HTTP ${res.status} ${res.statusText}`;
@@ -1644,7 +1714,7 @@
         }
       } catch (err) {
         if (err.name === 'TypeError' && err.message.includes('fetch')) {
-          resSpan.textContent = `❌ 瀏覽器連線受阻（可能是 CORS 跨域限制或憑證不受信任）。建議：1. 在網址列直接打開 ${inputUrl} 確認連線並接受憑證；2. 或在 NAS 部署 Docker 容器（無跨域限制）。`;
+          resSpan.innerHTML = `❌ 瀏覽器攔截了跨域或自簽憑證連線。<br/>👉 <a href="${targetUrl}" target="_blank" rel="noopener" style="color: var(--accent); text-decoration: underline; font-weight: 600;">請點此在新分頁開啟 ${targetUrl}</a>，點選「進階 → 繼續前往」信任憑證並輸入帳密驗證；若仍受瀏覽器 CORS 限制，建議於 NAS 啟用 Docker 容器。`;
         } else {
           resSpan.textContent = `❌ ${err.message}`;
         }

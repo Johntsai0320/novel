@@ -1,17 +1,40 @@
 const path = require('path');
 const cheerio = require('cheerio');
 
+// Allow connecting to private NAS / Tailscale HTTPS endpoints with self-signed certificates
+if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 /**
- * Normalize WebDAV base URL and relative path into a full request URL
+ * Normalize WebDAV base URL and relative path into a full request URL.
+ * Intelligently handles cases where the user includes part of the path in baseUrl.
  */
-function buildWebdavUrl(baseUrl, remotePath = '/') {
-  const cleanBase = baseUrl.replace(/\/+$/, '');
-  const cleanRel = ('/' + remotePath.replace(/^\/+/, '')).replace(/\/+/g, '/');
-  const encodedSegments = cleanRel
+function buildWebdavUrl(baseUrl, remotePath = '/', isDirectory = false) {
+  const parsedUrl = new URL(baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`);
+  const origin = parsedUrl.origin;
+  const urlPath = decodeURIComponent(parsedUrl.pathname || '/').replace(/\/+$/, '');
+
+  let cleanRel = ('/' + remotePath.replace(/^\/+/, '')).replace(/\/+/g, '/');
+
+  // Avoid duplicating base path if user put /WebDAV/小說 in both URL and basePath
+  let combinedPath = cleanRel;
+  if (urlPath && urlPath !== '/') {
+    if (!cleanRel.startsWith(urlPath)) {
+      combinedPath = path.posix.join(urlPath, cleanRel);
+    }
+  }
+
+  const encodedSegments = combinedPath
     .split('/')
     .map((seg) => (seg ? encodeURIComponent(decodeURIComponent(seg)) : ''))
     .join('/');
-  return `${cleanBase}${encodedSegments}`;
+
+  let finalUrl = `${origin}${encodedSegments.startsWith('/') ? '' : '/'}${encodedSegments}`;
+  if (isDirectory && !finalUrl.endsWith('/')) {
+    finalUrl += '/';
+  }
+  return finalUrl;
 }
 
 /**
@@ -27,14 +50,14 @@ function getAuthHeaders(username, password, extra = {}) {
 }
 
 /**
- * List files in a WebDAV directory (supports recursive listing up to maxDepth)
+ * List files in a WebDAV directory (supports recursive listing up to maxDepth = 4)
  */
-async function listWebdavNovels(config, subPath = '/', currentDepth = 0, maxDepth = 2) {
+async function listWebdavNovels(config, subPath = '/', currentDepth = 0, maxDepth = 4) {
   const { url, username, password, basePath = '/' } = config;
   if (!url) return [];
 
   const targetDir = path.posix.join('/', basePath || '/', subPath || '/');
-  const fullUrl = buildWebdavUrl(url, targetDir);
+  const fullUrl = buildWebdavUrl(url, targetDir, true);
 
   const response = await fetch(fullUrl, {
     method: 'PROPFIND',
@@ -54,8 +77,11 @@ async function listWebdavNovels(config, subPath = '/', currentDepth = 0, maxDept
   const results = [];
   const subDirs = [];
 
+  const fullUrlObj = new URL(fullUrl);
+  const currentReqPath = decodeURIComponent(fullUrlObj.pathname).replace(/\/+$/, '');
+
   // Parse WebDAV multistatus response nodes
-  $('response, d\\:response, D\\:response').each((idx, el) => {
+  $('response, d\\:response, D\\:response, lp1\\:response').each((idx, el) => {
     const hrefRaw = $(el).find('href, d\\:href, D\\:href').first().text().trim();
     if (!hrefRaw) return;
 
@@ -64,15 +90,16 @@ async function listWebdavNovels(config, subPath = '/', currentDepth = 0, maxDept
       $(el).find('collection, d\\:collection, D\\:collection').length > 0 ||
       decodedHref.endsWith('/');
 
-    // Skip the current directory entry itself (usually index 0)
-    const normalizedTarget = targetDir.replace(/\/+$/, '');
     const hrefPath = decodedHref.replace(/^https?:\/\/[^/]+/i, '').replace(/\/+$/, '');
-    if (idx === 0 || hrefPath.endsWith(normalizedTarget)) {
+    // Skip the current directory entry itself
+    if (hrefPath === currentReqPath || (idx === 0 && isCollection)) {
       return;
     }
 
     const baseName = path.posix.basename(hrefPath);
-    if (!baseName || baseName.startsWith('.')) return;
+    if (!baseName || baseName.startsWith('.') || baseName === '@eaDir' || baseName === '#recycle') {
+      return;
+    }
 
     const relFromSub = path.posix.join(subPath, baseName);
 
@@ -123,7 +150,7 @@ async function listWebdavNovels(config, subPath = '/', currentDepth = 0, maxDept
 async function fetchWebdavFileBuffer(config, relativePath) {
   const { url, username, password, basePath = '/' } = config;
   const targetFile = path.posix.join('/', basePath || '/', relativePath);
-  const fullUrl = buildWebdavUrl(url, targetFile);
+  const fullUrl = buildWebdavUrl(url, targetFile, false);
 
   const response = await fetch(fullUrl, {
     method: 'GET',
@@ -145,7 +172,7 @@ async function saveWebdavSyncJson(config, syncData) {
   if (!config || !config.url) return false;
   const { url, username, password, basePath = '/' } = config;
   const targetFile = path.posix.join('/', basePath || '/', '.novel-reader-sync.json');
-  const fullUrl = buildWebdavUrl(url, targetFile);
+  const fullUrl = buildWebdavUrl(url, targetFile, false);
 
   const response = await fetch(fullUrl, {
     method: 'PUT',
@@ -162,7 +189,7 @@ async function loadWebdavSyncJson(config) {
   if (!config || !config.url) return null;
   const { url, username, password, basePath = '/' } = config;
   const targetFile = path.posix.join('/', basePath || '/', '.novel-reader-sync.json');
-  const fullUrl = buildWebdavUrl(url, targetFile);
+  const fullUrl = buildWebdavUrl(url, targetFile, false);
 
   const response = await fetch(fullUrl, {
     method: 'GET',

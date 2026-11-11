@@ -11,13 +11,14 @@ services:
       - PORT=3000
       - NOVELS_DIR=/novels
       - DATA_DIR=/data
-      # 選填：若想預設掛載 WebDAV 遠端資料夾，可取消註解並填寫以下變數（亦可直接在網頁右上角 UI 設定）
-      # - WEBDAV_URL=http://192.168.1.100:5005
-      # - WEBDAV_USERNAME=admin
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+      # 選填：亦可透過環境變數直接連接 WebDAV
+      # - WEBDAV_URL=https://100.85.142.30:5006
+      # - WEBDAV_USERNAME=novel
       # - WEBDAV_PASSWORD=your_password
-      # - WEBDAV_BASE_PATH=/novels
+      # - WEBDAV_BASE_PATH=/WebDAV/小說
     volumes:
-      # 將左側的 ./novels 替換為您 NAS 上的實際小說共用資料夾路徑，例如 /volume1/books 或 /share/Multimedia/novels
-      - ./novels:/novels
+      # 掛載您 NAS 上的 /volume1/WebDAV/小說 資料夾（會自動掃描底下的 epub20261026 等所有子資料夾）
+      - /volume1/WebDAV/小說:/novels
       # 儲存跨裝置閱讀進度、書籤與 NAS 連線設定
       - ./data:/data
