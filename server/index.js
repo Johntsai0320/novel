@@ -268,15 +268,39 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Global cached file index for high-speed response with 50,000+ novels
+let cachedNovelsIndex = null;
+let lastScanTime = 0;
+const SCAN_CACHE_TTL_MS = 60 * 1000; // Cache index for 1 minute
+
+function getCachedNovelsList() {
+  const now = Date.now();
+  if (!cachedNovelsIndex || now - lastScanTime > SCAN_CACHE_TTL_MS) {
+    console.log(`[Cache] Scanning novels directory: ${NOVELS_DIR}`);
+    cachedNovelsIndex = scanLocalNovels(NOVELS_DIR);
+    lastScanTime = now;
+    console.log(`[Cache] Indexed ${cachedNovelsIndex.length} novels.`);
+  }
+  return cachedNovelsIndex;
+}
+
 /**
- * 2. List all books from NAS local folder + optional WebDAV
+ * 2. List books with server-side pagination, search, and folder filtering
  */
 app.get('/api/books', async (req, res) => {
   try {
     const convertMode = req.query.convert || 's2twp';
-    const localFiles = scanLocalNovels(NOVELS_DIR);
-    let allFiles = [...localFiles];
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 60));
+    const search = (req.query.q || '').trim().toLowerCase();
+    const folderFilter = req.query.folder || 'ALL';
+    const formatFilter = req.query.format || 'ALL';
+    const sortBy = req.query.sort || 'recent';
 
+    const localFiles = getCachedNovelsList();
+    let allFiles = localFiles;
+
+    // Optional WebDAV addition if enabled
     const cfg = loadNasConfig();
     const headerWebdav = getRequestWebdavConfig(req);
     const activeWebdav =
@@ -291,17 +315,50 @@ app.get('/api/books', async (req, res) => {
           }
         : null;
 
-    let webdavError = null;
     if (activeWebdav && activeWebdav.url) {
       try {
         const remoteFiles = await listWebdavNovels(activeWebdav);
         allFiles = allFiles.concat(remoteFiles);
-      } catch (err) {
-        webdavError = err.message;
-      }
+      } catch (err) {}
     }
 
-    const books = allFiles.map((item) => {
+    // Collect top folders and counts without looping entire list repeatedly
+    const folderCounts = {};
+    for (const item of allFiles) {
+      folderCounts[item.folder] = (folderCounts[item.folder] || 0) + 1;
+    }
+
+    // Filter books
+    let filtered = allFiles;
+    if (folderFilter !== 'ALL') {
+      filtered = filtered.filter((item) => item.folder === folderFilter);
+    }
+    if (formatFilter !== 'ALL') {
+      filtered = filtered.filter((item) => item.format === formatFilter);
+    }
+    if (search) {
+      filtered = filtered.filter((item) => {
+        const filename = item.filename.toLowerCase();
+        const folder = item.folder.toLowerCase();
+        return filename.includes(search) || folder.includes(search);
+      });
+    }
+
+    // Sort books
+    if (sortBy === 'title') {
+      filtered.sort((a, b) => a.filename.localeCompare(b.filename, 'zh-Hant'));
+    } else if (sortBy === 'size') {
+      filtered.sort((a, b) => (b.size || 0) - (a.size || 0));
+    } else if (sortBy === 'mtime') {
+      filtered.sort((a, b) => (b.mtime || '').localeCompare(a.mtime || ''));
+    }
+
+    const totalCount = filtered.length;
+    const startIndex = (page - 1) * limit;
+    const pagedItems = filtered.slice(startIndex, startIndex + limit);
+
+    // Convert only the paged slice (super fast!)
+    const books = pagedItems.map((item) => {
       const id = encodeBookId(item.source, item.relativePath);
       const rawTitle = path.basename(item.filename, path.extname(item.filename));
       return {
@@ -321,9 +378,13 @@ app.get('/api/books', async (req, res) => {
 
     res.json({
       ok: true,
-      total: books.length,
+      total: totalCount,
+      totalAll: allFiles.length,
+      page,
+      limit,
+      totalPages: Math.ceil(totalCount / limit),
+      folders: folderCounts,
       novelsDir: NOVELS_DIR,
-      webdavError,
       books
     });
   } catch (err) {

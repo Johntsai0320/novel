@@ -64,6 +64,11 @@
     selectedFormat: 'ALL',
     sortBy: 'recent',
     searchQuery: '',
+    currentPage: 1,
+    pageSize: 60,
+    totalPages: 1,
+    totalBooksCount: 0,
+    folderCountsMap: {},
 
     // Synced User Data
     progress: {},
@@ -644,12 +649,13 @@
   // ==========================================================================
   // 6. Initialize & Load Library Books
   // ==========================================================================
-  async function loadLibrary() {
+  async function loadLibrary(page = state.currentPage) {
+    state.currentPage = page;
     const connDot = document.getElementById('conn-dot');
     const connText = document.getElementById('conn-status-text');
 
     try {
-      // 1. Try connecting to NAS Backend API (/api/health & /api/books)
+      // 1. Try connecting to NAS Backend API (/api/health & /api/books with pagination)
       const health = await apiFetch('/api/health');
       if (health && health.ok) {
         state.serverAvailable = true;
@@ -669,15 +675,26 @@
           }
         } catch (_) {}
 
-        const booksRes = await apiFetch(
-          `/api/books?convert=${encodeURIComponent(state.settings.convertMode)}`
-        );
+        const queryParams = new URLSearchParams({
+          convert: state.settings.convertMode,
+          page: String(state.currentPage),
+          limit: String(state.pageSize),
+          folder: state.selectedFolder,
+          format: state.selectedFormat,
+          sort: state.sortBy,
+          q: state.searchQuery
+        });
+
+        const booksRes = await apiFetch(`/api/books?${queryParams.toString()}`);
 
         state.books = booksRes.books || [];
+        state.totalBooksCount = booksRes.total || 0;
+        state.totalPages = booksRes.totalPages || 1;
+        state.folderCountsMap = booksRes.folders || {};
+
         connDot.classList.remove('offline');
-        connText.textContent = booksRes.webdavError
-          ? `NAS 本機書庫 (${state.books.length} 本) · WebDAV 異常`
-          : `NAS 伺服器已連線 (${state.books.length} 本小說)`;
+        const countDisplay = (booksRes.totalAll || booksRes.total || 0).toLocaleString();
+        connText.textContent = `NAS 伺服器已連線 (${countDisplay} 本小說)`;
 
         await pullCloudSync(true);
         renderLibrary();
@@ -768,6 +785,7 @@
     renderContinueReading();
     renderFolderTabs();
     renderBooksGrid();
+    renderPaginationBar();
     updateGlobalConvertButtonUI();
   }
 
@@ -826,98 +844,73 @@
 
   function renderFolderTabs() {
     const container = document.getElementById('folder-tabs');
-    const folderCounts = new Map();
-
-    state.books.forEach((b) => {
-      const folderName = convertStr(b.originalFolder || b.folder || '未分類書庫');
-      b.folder = folderName;
-      b.title = convertStr(b.originalTitle || b.title);
-      folderCounts.set(folderName, (folderCounts.get(folderName) || 0) + 1);
-    });
-
     container.innerHTML = '';
 
     const allBtn = document.createElement('button');
     allBtn.type = 'button';
     allBtn.className = `folder-tab ${state.selectedFolder === 'ALL' ? 'active' : ''}`;
-    allBtn.textContent = `全部書庫 (${state.books.length})`;
+    allBtn.textContent = `全部書庫 (${state.totalBooksCount || state.books.length})`;
     allBtn.addEventListener('click', () => {
       state.selectedFolder = 'ALL';
-      renderFolderTabs();
-      renderBooksGrid();
+      state.currentPage = 1;
+      loadLibrary(1);
     });
     container.appendChild(allBtn);
 
-    Array.from(folderCounts.entries()).forEach(([folder, count]) => {
+    // If server returned folderCountsMap, render top folders
+    const entries = Object.entries(state.folderCountsMap || {});
+    // Sort folders by book count descending, limit top 12 to avoid clutter
+    entries.sort((a, b) => b[1] - a[1]);
+    const topFolders = entries.slice(0, 15);
+
+    topFolders.forEach(([folder, count]) => {
+      const displayFolder = convertStr(folder);
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = `folder-tab ${state.selectedFolder === folder ? 'active' : ''}`;
-      btn.textContent = `📁 ${folder} (${count})`;
+      btn.textContent = `📁 ${displayFolder} (${count})`;
       btn.addEventListener('click', () => {
         state.selectedFolder = folder;
-        renderFolderTabs();
-        renderBooksGrid();
+        state.currentPage = 1;
+        loadLibrary(1);
       });
       container.appendChild(btn);
     });
   }
 
+  function renderPaginationBar() {
+    const bar = document.getElementById('pagination-bar');
+    const prevBtn = document.getElementById('prev-page-btn');
+    const nextBtn = document.getElementById('next-page-btn');
+    const indicator = document.getElementById('page-indicator');
+    if (!bar) return;
+
+    if (state.totalPages <= 1) {
+      bar.style.display = 'none';
+      return;
+    }
+
+    bar.style.display = 'flex';
+    prevBtn.disabled = state.currentPage <= 1;
+    nextBtn.disabled = state.currentPage >= state.totalPages;
+    indicator.textContent = `第 ${state.currentPage} / ${state.totalPages} 頁 (共 ${state.totalBooksCount.toLocaleString()} 本)`;
+  }
+
   function renderBooksGrid() {
     const grid = document.getElementById('books-grid');
-    const q = state.searchQuery.trim().toLowerCase();
-
-    let filtered = state.books.filter((book) => {
-      const displayTitle = convertStr(book.originalTitle || book.title);
-      const displayFolder = convertStr(book.originalFolder || book.folder);
-      book.title = displayTitle;
-      book.folder = displayFolder;
-
-      if (state.selectedFolder !== 'ALL' && displayFolder !== state.selectedFolder) {
-        return false;
-      }
-      if (state.selectedFormat !== 'ALL' && book.format !== state.selectedFormat) {
-        return false;
-      }
-      if (q) {
-        const haystack = `${displayTitle} ${book.originalTitle || ''} ${displayFolder} ${book.filename || ''}`.toLowerCase();
-        return haystack.includes(q);
-      }
-      return true;
-    });
-
-    // Sort books
-    filtered.sort((a, b) => {
-      if (state.sortBy === 'recent') {
-        const progA = state.progress[a.id]?.updatedAt || '';
-        const progB = state.progress[b.id]?.updatedAt || '';
-        if (progA !== progB) return progB.localeCompare(progA);
-        return a.title.localeCompare(b.title, 'zh-Hant');
-      }
-      if (state.sortBy === 'title') {
-        return a.title.localeCompare(b.title, 'zh-Hant');
-      }
-      if (state.sortBy === 'size') {
-        return (b.size || 0) - (a.size || 0);
-      }
-      if (state.sortBy === 'mtime') {
-        return (b.mtime || '').localeCompare(a.mtime || '');
-      }
-      return 0;
-    });
-
     grid.innerHTML = '';
 
-    if (filtered.length === 0) {
+    if (!state.books || state.books.length === 0) {
       grid.innerHTML = `
         <div class="empty-state" style="grid-column: 1 / -1;">
           <h3>找不到符合條件的小說檔案</h3>
-          <p>您可以將 <code>.epub</code> 或 <code>.txt</code> 小說放入 NAS 的 <code>/novels</code> 資料夾、設定 WebDAV 遠端資料夾，或直接點擊上方「上傳小說」按鈕。</p>
+          <p>您可以嘗試清除搜尋關鍵字、切換分類標籤，或點擊上方「上傳小說」按鈕。</p>
         </div>
       `;
       return;
     }
 
-    filtered.forEach((book) => {
+    state.books.forEach((book) => {
       const prog = state.progress[book.id];
       const toneClass = getCoverToneClass(book.id);
 
@@ -1464,33 +1457,61 @@
   }
 
   function bindEvents() {
-    // Search Box
+    // Search Box with 400ms debounce for 50,000+ books
     const searchInput = document.getElementById('search-input');
     const searchClear = document.getElementById('search-clear-btn');
+    let searchDebounceTimer = null;
 
     searchInput.addEventListener('input', () => {
       state.searchQuery = searchInput.value;
       searchClear.style.display = state.searchQuery ? 'block' : 'none';
-      renderBooksGrid();
+      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        state.currentPage = 1;
+        loadLibrary(1);
+      }, 350);
     });
 
     searchClear.addEventListener('click', () => {
       searchInput.value = '';
       state.searchQuery = '';
       searchClear.style.display = 'none';
-      renderBooksGrid();
+      state.currentPage = 1;
+      loadLibrary(1);
     });
 
     // Format & Sort Selectors
     document.getElementById('format-filter').addEventListener('change', (e) => {
       state.selectedFormat = e.target.value;
-      renderBooksGrid();
+      state.currentPage = 1;
+      loadLibrary(1);
     });
 
     document.getElementById('sort-select').addEventListener('change', (e) => {
       state.sortBy = e.target.value;
-      renderBooksGrid();
+      state.currentPage = 1;
+      loadLibrary(1);
     });
+
+    // Pagination Controls
+    const prevPageBtn = document.getElementById('prev-page-btn');
+    const nextPageBtn = document.getElementById('next-page-btn');
+    if (prevPageBtn) {
+      prevPageBtn.addEventListener('click', () => {
+        if (state.currentPage > 1) {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          loadLibrary(state.currentPage - 1);
+        }
+      });
+    }
+    if (nextPageBtn) {
+      nextPageBtn.addEventListener('click', () => {
+        if (state.currentPage < state.totalPages) {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          loadLibrary(state.currentPage + 1);
+        }
+      });
+    }
 
     // Global & Reader Simplified-to-Traditional Toggle
     document.getElementById('global-convert-btn').addEventListener('click', cycleConvertMode);
