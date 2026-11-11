@@ -1,0 +1,33 @@
+{
+   "cmd" : "sh -c \"apk add --no-cache git && rm -rf /app/* && git clone https://github.com/Johntsai0320/novel.git /app && cd /app && npm install --omit=dev && node server/index.js\"",
+   "container_name" : "nas-novel-reader",
+   "cpu_priority" : 50,
+   "enable_publish_all_ports" : false,
+   "enable_restart_policy" : true,
+   "enabled" : true,
+   "image" : "node:20-alpine",
+   "is_ddsm" : false,
+   "is_package" : false,
+   "name" : "nas-novel-reader",
+   "network" : [
+      {
+         "driver" : "bridge",
+         "name" : "bridge"
+      }
+   ],
+   "port_bindings" : [
+      {
+         "container_port" : 3000,
+         "host_port" : 3000,
+         "type" : "tcp"
+      }
+   ],
+   "privileged" : false,
+   "volume_bindings" : [
+      {
+         "host_volume_file": "/WebDAV/小說",
+         "mount_point": "/novels",
+         "type": "rw"
+      }
+   ]
+}
