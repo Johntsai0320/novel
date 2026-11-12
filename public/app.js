@@ -1396,9 +1396,9 @@
     if (flipLabel) {
       flipLabel.textContent =
         flipMode === 'both'
-          ? '點右翻下一章 / 點左上一章'
+          ? '點右翻頁(底進下一章) / 點左回翻'
           : flipMode === 'next_only'
-          ? '點擊即下一章'
+          ? '點擊即翻頁(底進下一章)'
           : '已關閉點擊翻頁';
     }
 
@@ -1579,7 +1579,54 @@
       { passive: true }
     );
 
-    // Tap reader canvas to flip chapter or toggle popover
+    // Helper functions for page flipping (scroll within chapter, change chapter at boundary)
+    function flipToNextPageOrChapter() {
+      const scrollY = window.scrollY || window.pageYOffset;
+      const viewportHeight = window.innerHeight;
+      const totalHeight = document.documentElement.scrollHeight;
+      const maxScroll = totalHeight - viewportHeight;
+
+      // Distance from bottom of current chapter
+      const remainingBottom = maxScroll - scrollY;
+
+      // If already at or very near bottom (within 40px), transition to next chapter
+      if (remainingBottom <= 40) {
+        if (state.currentChapter && state.currentChapter.nextIndex !== null) {
+          loadAndRenderChapter(state.currentChapter.nextIndex, 0);
+          showToast(`已翻至下一章：${convertStr(state.currentChapter?.title || '')}`);
+        } else {
+          showToast('已是全書最後一章');
+        }
+      } else {
+        // Page down by 85% of screen height (leaving 15% overlap for reading continuity)
+        const step = Math.max(160, Math.floor(viewportHeight * 0.85));
+        const target = Math.min(maxScroll, scrollY + step);
+        window.scrollTo({ top: target, behavior: 'smooth' });
+      }
+    }
+
+    function flipToPrevPageOrChapter() {
+      const scrollY = window.scrollY || window.pageYOffset;
+      const viewportHeight = window.innerHeight;
+
+      // If already at or very near top (within 40px), transition to previous chapter
+      if (scrollY <= 40) {
+        if (state.currentChapter && state.currentChapter.prevIndex !== null) {
+          // Open previous chapter at 100% (the bottom of previous chapter)
+          loadAndRenderChapter(state.currentChapter.prevIndex, 100);
+          showToast(`已翻至上一章：${convertStr(state.currentChapter?.title || '')}`);
+        } else {
+          showToast('已是第一章頂部');
+        }
+      } else {
+        // Page up by 85% of screen height
+        const step = Math.max(160, Math.floor(viewportHeight * 0.85));
+        const target = Math.max(0, scrollY - step);
+        window.scrollTo({ top: target, behavior: 'smooth' });
+      }
+    }
+
+    // Tap reader canvas to flip page/chapter
     document.getElementById('reader-canvas').addEventListener('click', (e) => {
       // Ignore if user clicked a link, button, or selected text
       if (e.target.closest('button, a')) return;
@@ -1600,29 +1647,15 @@
       const ratio = clickX / winWidth;
 
       if (flipMode === 'next_only') {
-        // Any tap except extreme left margin flips to next chapter
-        if (state.currentChapter && state.currentChapter.nextIndex !== null) {
-          loadAndRenderChapter(state.currentChapter.nextIndex, 0);
-          showToast(`已翻至：${convertStr(state.currentChapter?.title || '下一章')}`);
-        } else {
-          showToast('已是最後一章');
-        }
+        flipToNextPageOrChapter();
         return;
       }
 
-      // 'both' mode: Right 65% flips next chapter, Left 35% flips prev chapter
+      // 'both' mode: Right 65% flips down (next page/chapter), Left 35% flips up (prev page/chapter)
       if (ratio >= 0.35) {
-        if (state.currentChapter && state.currentChapter.nextIndex !== null) {
-          loadAndRenderChapter(state.currentChapter.nextIndex, 0);
-        } else {
-          showToast('已是最後一章');
-        }
+        flipToNextPageOrChapter();
       } else {
-        if (state.currentChapter && state.currentChapter.prevIndex !== null) {
-          loadAndRenderChapter(state.currentChapter.prevIndex, 0);
-        } else {
-          showToast('已是第一章');
-        }
+        flipToPrevPageOrChapter();
       }
     });
 
