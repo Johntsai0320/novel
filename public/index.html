@@ -260,12 +260,16 @@
 
       <div class="setting-row">
         <div class="setting-label">
-          <span>版面寬度 (電腦版)</span>
+          <span>點擊書頁翻頁模式</span>
+          <span id="click-flip-label" style="font-size: 0.75rem; color: var(--accent);">點右翻下一章</span>
         </div>
         <div class="segmented-group">
-          <button type="button" class="segmented-btn" data-width-opt="640">窄版</button>
-          <button type="button" class="segmented-btn active" data-width-opt="760">標準</button>
-          <button type="button" class="segmented-btn" data-width-opt="940">寬版</button>
+          <button type="button" class="segmented-btn active" data-flip-opt="both">點右/點左</button>
+          <button type="button" class="segmented-btn" data-flip-opt="next_only">點擊即下一章</button>
+          <button type="button" class="segmented-btn" data-flip-opt="off">關閉點擊翻頁</button>
+        </div>
+        <div class="form-hint" style="margin-top: 0.35rem; font-size: 0.72rem;">
+          點擊書頁右側 70% 翻至下一章、左側 30% 翻至上一章（中間 40% 呼叫頂部選單）。
         </div>
       </div>
     </aside>

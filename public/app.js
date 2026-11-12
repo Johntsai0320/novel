@@ -79,7 +79,8 @@
       lineHeight: 1.85,
       fontFamily: 'serif',
       maxWidth: 760,
-      convertMode: 's2twp'
+      convertMode: 's2twp',
+      clickFlip: 'both' // 'both' | 'next_only' | 'off'
     },
 
     // Active Reader Session
@@ -1387,6 +1388,20 @@
       btn.classList.toggle('active', parseInt(btn.dataset.widthOpt, 10) === parseInt(s.maxWidth, 10));
     });
 
+    const flipMode = s.clickFlip || 'both';
+    document.querySelectorAll('[data-flip-opt]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.flipOpt === flipMode);
+    });
+    const flipLabel = document.getElementById('click-flip-label');
+    if (flipLabel) {
+      flipLabel.textContent =
+        flipMode === 'both'
+          ? '點右翻下一章 / 點左上一章'
+          : flipMode === 'next_only'
+          ? '點擊即下一章'
+          : '已關閉點擊翻頁';
+    }
+
     const fsDisplay = document.getElementById('font-size-display');
     const fsVal = document.getElementById('font-size-val');
     if (fsDisplay) fsDisplay.textContent = `${s.fontSize}px`;
@@ -1564,13 +1579,50 @@
       { passive: true }
     );
 
-    // Tap center of reader canvas on mobile to toggle topbar visibility
+    // Tap reader canvas to flip chapter or toggle popover
     document.getElementById('reader-canvas').addEventListener('click', (e) => {
+      // Ignore if user clicked a link, button, or selected text
       if (e.target.closest('button, a')) return;
+      const selection = window.getSelection();
+      if (selection && selection.toString().trim().length > 0) return;
+
       const popover = document.getElementById('reader-settings-popover');
       if (popover.classList.contains('open')) {
         popover.classList.remove('open');
         return;
+      }
+
+      const flipMode = state.settings.clickFlip || 'both';
+      if (flipMode === 'off') return;
+
+      const winWidth = window.innerWidth || document.documentElement.clientWidth;
+      const clickX = e.clientX;
+      const ratio = clickX / winWidth;
+
+      if (flipMode === 'next_only') {
+        // Any tap except extreme left margin flips to next chapter
+        if (state.currentChapter && state.currentChapter.nextIndex !== null) {
+          loadAndRenderChapter(state.currentChapter.nextIndex, 0);
+          showToast(`已翻至：${convertStr(state.currentChapter?.title || '下一章')}`);
+        } else {
+          showToast('已是最後一章');
+        }
+        return;
+      }
+
+      // 'both' mode: Right 65% flips next chapter, Left 35% flips prev chapter
+      if (ratio >= 0.35) {
+        if (state.currentChapter && state.currentChapter.nextIndex !== null) {
+          loadAndRenderChapter(state.currentChapter.nextIndex, 0);
+        } else {
+          showToast('已是最後一章');
+        }
+      } else {
+        if (state.currentChapter && state.currentChapter.prevIndex !== null) {
+          loadAndRenderChapter(state.currentChapter.prevIndex, 0);
+        } else {
+          showToast('已是第一章');
+        }
       }
     });
 
@@ -1599,6 +1651,21 @@
     settingsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       settingsPopover.classList.toggle('open');
+    });
+
+    document.querySelectorAll('[data-flip-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.settings.clickFlip = btn.dataset.flipOpt;
+        applyReaderSettingsToDOM();
+        pushCloudSync();
+        const modeText =
+          btn.dataset.flipOpt === 'both'
+            ? '點右翻下一章 / 點左上一章'
+            : btn.dataset.flipOpt === 'next_only'
+            ? '點擊即下一章'
+            : '已關閉點擊翻頁';
+        showToast(`翻頁模式：${modeText}`);
+      });
     });
 
     document.querySelectorAll('[data-theme-opt]').forEach((btn) => {
