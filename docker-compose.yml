@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  novel-reader:
+    build: .
+    container_name: nas-novel-reader
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NOVELS_DIR=/novels
+      - DATA_DIR=/data
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+      # 選填：亦可透過環境變數直接連接 WebDAV
+      # - WEBDAV_URL=https://nas.example.com:5006
+      # - WEBDAV_USERNAME=your_username
+      # - WEBDAV_PASSWORD=your_password
+      # - WEBDAV_BASE_PATH=/books
+    volumes:
+      # 掛載您 NAS 上的書籍資料夾（會自動遞迴掃描所有子資料夾）
+      - ./novels:/novels
+      # 儲存跨裝置閱讀進度、書籤與 NAS 連線設定
+      - ./data:/data

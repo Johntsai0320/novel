@@ -1,0 +1,36 @@
+{
+  "name": "nas-novel-reader",
+  "version": "1.0.0",
+  "description": "雲端書閣 — 私人 NAS 線上 EPUB/TXT 小說閱讀平台（免下載串流閱讀、自動簡轉繁、跨裝置閱讀紀錄雲端同步）",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "generate-samples": "node scripts/generate-samples.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Johntsai0320/novel.git"
+  },
+  "keywords": [
+    "nas",
+    "novel",
+    "epub",
+    "txt",
+    "reader",
+    "opencc",
+    "webdav",
+    "traditional-chinese"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "chardet": "^2.1.0",
+    "cheerio": "^1.0.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "iconv-lite": "^0.6.3",
+    "jszip": "^3.10.1",
+    "opencc-js": "^1.0.5"
+  }
+}
