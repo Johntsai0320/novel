@@ -167,9 +167,9 @@
             id="reader-pdf-mode-btn"
             class="btn"
             style="display: none;"
-            title="切換「提取文字排版(支援簡轉繁)」或「原版 PDF 檢視器」"
+            title="切換「📐 PDF 智慧重排（自動合併斷行/去頁碼）」、「📝 PDF 原始斷行」或「📄 原版 PDF 檢視器」"
           >
-            📄 <span id="reader-pdf-mode-text">原版 PDF</span>
+            <span id="reader-pdf-mode-text">📐 PDF 重排</span>
           </button>
 
           <button
@@ -319,6 +319,18 @@
         <div class="segmented-group" style="grid-template-columns: repeat(2, 1fr);">
           <button type="button" class="segmented-btn active" data-dir-opt="horizontal">☰ 橫排 (由上而下)</button>
           <button type="button" class="segmented-btn" data-dir-opt="vertical">▤ 直排 (傳統直書)</button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div class="setting-label">
+          <span>PDF 內建重排與斷行修復</span>
+          <span id="pdf-reflow-label" style="font-size: 0.75rem; color: var(--accent);">📐 智慧重排</span>
+        </div>
+        <div class="segmented-group" style="grid-template-columns: repeat(3, 1fr);">
+          <button type="button" class="segmented-btn active" data-pdf-reflow-opt="reflow" title="自動合併跨行斷句、移除重複頁眉與頁碼，支援直橫排與字級縮放">📐 智慧重排</button>
+          <button type="button" class="segmented-btn" data-pdf-reflow-opt="raw" title="保留原始每行換行與頁碼標記">📝 原始斷行</button>
+          <button type="button" class="segmented-btn" data-pdf-reflow-opt="native" id="pdf-native-opt-btn" title="開啟原版 PDF 頁面檢視器">📄 原版 PDF</button>
         </div>
       </div>
 

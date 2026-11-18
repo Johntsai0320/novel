@@ -459,6 +459,8 @@ app.get('/api/books/:id/toc', async (req, res) => {
         encoding: parsed.encoding,
         rawPdfUrl: parsed.rawPdfUrl || null,
         pdfPageCount: parsed.pdfPageCount || null,
+        pdfReflowed: Boolean(parsed.pdfReflowed),
+        pdfReflowStats: parsed.pdfReflowStats || null,
         totalChapters: parsed.totalChapters,
         totalWords: parsed.totalWords,
         chapters
@@ -524,6 +526,9 @@ app.get('/api/books/:id/chapter/:index', async (req, res) => {
 
     const chapter = parsed.chapters[chIdx];
     const convertedContent = convertText(chapter.content, convertMode);
+    const convertedRawLineContent = chapter.rawLineContent
+      ? convertText(chapter.rawLineContent, convertMode)
+      : null;
 
     let convertedBlocks = null;
     if (chapter.blocks && Array.isArray(chapter.blocks)) {
@@ -547,6 +552,7 @@ app.get('/api/books/:id/chapter/:index', async (req, res) => {
         originalTitle: chapter.title,
         wordCount: chapter.wordCount,
         content: convertedContent,
+        rawLineContent: convertedRawLineContent,
         blocks: convertedBlocks,
         prevIndex: chIdx > 0 ? chIdx - 1 : null,
         nextIndex: chIdx < parsed.chapters.length - 1 ? chIdx + 1 : null

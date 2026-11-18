@@ -260,12 +260,14 @@
       maxWidth: 760,
       convertMode: 's2twp',
       writingMode: 'horizontal', // 'horizontal' | 'vertical'
+      pdfReflowMode: 'reflow',   // 'reflow' (智慧重排) | 'raw' (原始斷行) | 'native' (原版 PDF)
       clickFlip: 'both' // 'both' | 'left_next' | 'next_only' | 'off'
     },
 
     // Active Reader Session & Annotation Tools
     currentBook: null,      // { id, title, originalTitle, author, totalChapters, chapters: [...] }
-    currentChapter: null,   // { index, title, originalTitle, content, blocks, wordCount, prevIndex, nextIndex }
+    currentChapter: null,   // { index, title, originalTitle, content, rawLineContent, blocks, wordCount, prevIndex, nextIndex }
+    pdfViewMode: 'reflow',  // 'reflow' | 'raw' | 'native'
     activeDrawerTab: 'toc',
     tocSearchQuery: '',
     isRestoringScroll: false,
@@ -675,10 +677,402 @@
     }
   }
 
-  function parsePdfClient(arrayBuffer, filename) {
+  const PDF_CHAPTER_HEADING_REGEX_CLIENT =
+    /^(?:第\s*[零一二三四五六七八九十百千万萬千0-9]+\s*[章節节回卷部篇集話话]|(?:Chapter|CHAPTER|Part|PART|Section|Book)\s+[0-9IVXLCDM]+|(?:序章|楔子|引子|プロローグ|前言|自序|導讀|导读|後記|后记|尾聲|尾声|番外|附錄|附录)(?:\s|$|[：:—\-])|[一二三四五六七八九十]+[、.．]\s*\S+)/;
+
+  const PAGE_NUMBER_LINE_REGEX_CLIENT =
+    /^(?:[-—–~～·•\s]*\d{1,5}[-—–~～·•\s]*|第\s*\d{1,5}\s*[頁页](?:\s*[\/／]\s*共?\s*\d{1,5}\s*[頁页])?|【\s*第\s*\d{1,5}\s*[頁页]\s*】|Page\s+\d{1,5}(?:\s+of\s+\d{1,5})?)$/i;
+
+  const TERMINAL_PUNCT_REGEX_CLIENT = /[。！？!?…⋯」』”"》）)\.!;:]$/;
+  const LIST_OR_DIALOGUE_START_REGEX_CLIENT =
+    /^(?:[「『“"（(【《]|[-•·*]\s+|\d{1,3}[.、)）]\s*|[①②③④⑤⑥⑦⑧⑨⑩])/;
+
+  function getVisualWidthClient(str) {
+    let w = 0;
+    for (let i = 0; i < str.length; i++) {
+      w += str.charCodeAt(i) > 0xff ? 2 : 1;
+    }
+    return w;
+  }
+
+  function joinReflowedLinesClient(prev, next) {
+    if (/[a-zA-Z]-$/.test(prev) && /^[a-z]/.test(next)) {
+      return prev.slice(0, -1) + next;
+    }
+    const lastChar = prev.charAt(prev.length - 1);
+    const firstChar = next.charAt(0);
+    if (/[a-zA-Z0-9,.;:?!)]/.test(lastChar) && /[a-zA-Z0-9(]/.test(firstChar)) {
+      return `${prev} ${next}`;
+    }
+    return prev + next;
+  }
+
+  function normalizePdfLineSpacingClient(line) {
+    const cjkChar = '[\\u2E80-\\u9FFF\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFFEF]';
+    const spacedSingleCjkRegex = new RegExp(`(?:^|\\s)${cjkChar}\\s+${cjkChar}\\s+${cjkChar}`, '');
+    if (!spacedSingleCjkRegex.test(line)) {
+      return line;
+    }
+    const cjkClass =
+      '[\\u2E80-\\u9FFF\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFFEF「」『』《》〈〉【】〔〕（）—…]';
+    const re = new RegExp(`(${cjkClass})[ \\t]+(?=${cjkClass})`, 'g');
+    return line.replace(re, '$1');
+  }
+
+  /**
+   * Client-side Smart PDF & Hard-Wrapped Text Reflow Engine
+   */
+  function reflowPdfTextClient(pagesOrText, options = {}) {
+    const { stripHeadersFooters = true, mergeBrokenLines = true } = options;
+
+    const rawPages = Array.isArray(pagesOrText)
+      ? pagesOrText.map((p) => String(p || ''))
+      : String(pagesOrText || '').split(/\f|\n(?=【第\s*\d+\s*[頁页]】)/);
+
+    let removedArtifacts = 0;
+    const pageLinesList = rawPages.map((pageStr) =>
+      pageStr
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+    );
+
+    const repeatedHeaderFooterSet = new Set();
+    if (stripHeadersFooters && pageLinesList.length >= 3) {
+      const edgeCounts = new Map();
+      for (const lines of pageLinesList) {
+        const nonEmpty = lines.map((l) => l.trim()).filter(Boolean);
+        if (nonEmpty.length === 0) continue;
+        const candidates = new Set([nonEmpty[0], nonEmpty[nonEmpty.length - 1]]);
+        for (const c of candidates) {
+          if (c.length <= 45 && !PDF_CHAPTER_HEADING_REGEX_CLIENT.test(c)) {
+            edgeCounts.set(c, (edgeCounts.get(c) || 0) + 1);
+          }
+        }
+      }
+      const threshold = Math.max(2, Math.ceil(pageLinesList.length * 0.4));
+      for (const [lineText, count] of edgeCounts.entries()) {
+        if (count >= threshold) repeatedHeaderFooterSet.add(lineText);
+      }
+    }
+
+    const cleanedLines = [];
+    let rawLineCount = 0;
+
+    for (const lines of pageLinesList) {
+      let firstIdx = -1;
+      let lastIdx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trim()) {
+          if (firstIdx === -1) firstIdx = i;
+          lastIdx = i;
+        }
+      }
+
+      for (let i = 0; i < lines.length; i++) {
+        rawLineCount++;
+        const rawLine = lines[i];
+        const trimmed = rawLine.trim();
+
+        if (!trimmed) {
+          cleanedLines.push({ raw: '', trimmed: '', isBlank: true, isIndented: false });
+          continue;
+        }
+
+        if (stripHeadersFooters) {
+          if (PAGE_NUMBER_LINE_REGEX_CLIENT.test(trimmed)) {
+            removedArtifacts++;
+            continue;
+          }
+          if ((i === firstIdx || i === lastIdx) && repeatedHeaderFooterSet.has(trimmed)) {
+            removedArtifacts++;
+            continue;
+          }
+        }
+
+        const normalizedTrimmed = normalizePdfLineSpacingClient(trimmed);
+        const isIndented = /^(?:　+|\s{2,}|\t+)/.test(rawLine);
+
+        cleanedLines.push({
+          raw: rawLine,
+          trimmed: normalizedTrimmed,
+          isBlank: false,
+          isIndented
+        });
+      }
+    }
+
+    if (!mergeBrokenLines) {
+      const paragraphs = cleanedLines.filter((l) => !l.isBlank).map((l) => l.trimmed);
+      return {
+        paragraphs,
+        text: paragraphs.join('\n\n'),
+        stats: { rawLines: rawLineCount, reflowedParagraphs: paragraphs.length, removedArtifacts }
+      };
+    }
+
+    const lengths = cleanedLines
+      .filter((l) => !l.isBlank && l.trimmed.length > 5)
+      .map((l) => getVisualWidthClient(l.trimmed))
+      .sort((a, b) => a - b);
+
+    const typicalFullWidth =
+      lengths.length > 0
+        ? lengths[Math.min(lengths.length - 1, Math.floor(lengths.length * 0.75))]
+        : 60;
+
+    const paragraphs = [];
+    let currentPara = '';
+    let prevLineWidth = 0;
+
+    for (let i = 0; i < cleanedLines.length; i++) {
+      const item = cleanedLines[i];
+      if (item.isBlank) {
+        if (currentPara) {
+          paragraphs.push(currentPara);
+          currentPara = '';
+          prevLineWidth = 0;
+        }
+        continue;
+      }
+
+      const line = item.trimmed;
+      const lineWidth = getVisualWidthClient(line);
+      const isHeading = PDF_CHAPTER_HEADING_REGEX_CLIENT.test(line) && line.length <= 50;
+
+      if (!currentPara) {
+        currentPara = line;
+        prevLineWidth = lineWidth;
+        if (isHeading) {
+          paragraphs.push(currentPara);
+          currentPara = '';
+          prevLineWidth = 0;
+        }
+        continue;
+      }
+
+      const prevEndsWithTerminal = TERMINAL_PUNCT_REGEX_CLIENT.test(currentPara);
+      const prevWasShortLine = prevLineWidth < typicalFullWidth * 0.78;
+      const nextStartsNewBlock =
+        isHeading || item.isIndented || LIST_OR_DIALOGUE_START_REGEX_CLIENT.test(line);
+
+      const shouldStartNewParagraph =
+        isHeading ||
+        item.isIndented ||
+        (prevEndsWithTerminal && (prevWasShortLine || nextStartsNewBlock));
+
+      if (shouldStartNewParagraph) {
+        paragraphs.push(currentPara);
+        currentPara = line;
+        prevLineWidth = lineWidth;
+        if (isHeading) {
+          paragraphs.push(currentPara);
+          currentPara = '';
+          prevLineWidth = 0;
+        }
+      } else {
+        currentPara = joinReflowedLinesClient(currentPara, line);
+        prevLineWidth = lineWidth;
+      }
+    }
+
+    if (currentPara) {
+      paragraphs.push(currentPara);
+    }
+
+    return {
+      paragraphs,
+      text: paragraphs.join('\n\n'),
+      stats: { rawLines: rawLineCount, reflowedParagraphs: paragraphs.length, removedArtifacts }
+    };
+  }
+
+  async function inflateStreamClient(uint8Slice) {
+    if (typeof DecompressionStream === 'undefined') {
+      return new TextDecoder('latin1').decode(uint8Slice);
+    }
+    for (const format of ['deflate', 'deflate-raw']) {
+      try {
+        const ds = new DecompressionStream(format);
+        const writer = ds.writable.getWriter();
+        writer.write(uint8Slice);
+        writer.close();
+        const outBuf = await new Response(ds.readable).arrayBuffer();
+        return new TextDecoder('latin1').decode(outBuf);
+      } catch (_) {}
+    }
+    return new TextDecoder('latin1').decode(uint8Slice);
+  }
+
+  function decodeHexUtf16BeClient(hex) {
+    if (!hex) return '';
+    const clean = hex.replace(/\s+/g, '');
+    if (clean.length === 2) return String.fromCharCode(parseInt(clean, 16));
+    const padded = clean.length % 2 === 0 ? clean : '0' + clean;
+    let out = '';
+    for (let i = 0; i + 3 < padded.length; i += 4) {
+      const code = parseInt(padded.slice(i, i + 4), 16);
+      if (code === 0xfeff) continue;
+      out += String.fromCharCode(code);
+    }
+    return out;
+  }
+
+  function parseToUnicodeCMapClient(cmapStr) {
+    const map = new Map();
+    let keyByteLen = 2;
+    const bfcharRegex = /beginbfchar([\s\S]*?)endbfchar/g;
+    let m;
+    while ((m = bfcharRegex.exec(cmapStr)) !== null) {
+      const pairRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+      let p;
+      while ((p = pairRegex.exec(m[1])) !== null) {
+        if (p[1].length === 2) keyByteLen = 1;
+        const code = parseInt(p[1], 16);
+        const u = decodeHexUtf16BeClient(p[2]);
+        if (!Number.isNaN(code) && u) map.set(code, u);
+      }
+    }
+    const bfrangeRegex = /beginbfrange([\s\S]*?)endbfrange/g;
+    while ((m = bfrangeRegex.exec(cmapStr)) !== null) {
+      const rangeDirectRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+      let r;
+      while ((r = rangeDirectRegex.exec(m[1])) !== null) {
+        const s = parseInt(r[1], 16);
+        const e = parseInt(r[2], 16);
+        const base = parseInt(r[3], 16);
+        if (r[1].length === 2) keyByteLen = 1;
+        if (!Number.isNaN(s) && !Number.isNaN(e) && !Number.isNaN(base)) {
+          const lim = Math.min(e, s + 4096);
+          for (let c = s; c <= lim; c++) map.set(c, String.fromCodePoint(base + (c - s)));
+        }
+      }
+    }
+    return { map, keyByteLen };
+  }
+
+  function decodeHexWithCMapClient(hexStr, cmapObj) {
+    const clean = hexStr.replace(/\s+/g, '');
+    if (!clean) return '';
+    if (clean.toUpperCase().startsWith('FEFF')) return decodeHexUtf16BeClient(clean.slice(4));
+    if (cmapObj && cmapObj.map && cmapObj.map.size > 0) {
+      const step = cmapObj.keyByteLen === 1 ? 2 : 4;
+      let out = '';
+      for (let i = 0; i < clean.length; i += step) {
+        const slice = clean.slice(i, i + step);
+        const code = parseInt(slice, 16);
+        if (cmapObj.map.has(code)) out += cmapObj.map.get(code);
+        else if (code >= 0x20) out += String.fromCharCode(code);
+      }
+      return out;
+    }
+    if (clean.length % 4 === 0) return decodeHexUtf16BeClient(clean);
+    return clean;
+  }
+
+  async function parsePdfClient(arrayBuffer, filename) {
     const rawTitle = filename.replace(/\.pdf$/i, '');
     const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
     const blobUrl = URL.createObjectURL(blob);
+
+    try {
+      const rawLatin1 = new TextDecoder('latin1').decode(arrayBuffer);
+      const uint8 = new Uint8Array(arrayBuffer);
+      const pageMatches = rawLatin1.match(/\/Type\s*\/Page\b(?!s)/g);
+      const numpages = pageMatches ? pageMatches.length : 1;
+
+      const globalCMap = new Map();
+      let globalKeyByteLen = 2;
+      const contentStreams = [];
+
+      const streamRegex = /stream(?:\r\n|\n)([\s\S]*?)endstream/g;
+      let match;
+      while ((match = streamRegex.exec(rawLatin1)) !== null) {
+        const startOffset = match.index + match[0].indexOf(match[1]);
+        const endOffset = startOffset + match[1].length;
+        const contentStr = await inflateStreamClient(uint8.subarray(startOffset, endOffset));
+        if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
+          const parsed = parseToUnicodeCMapClient(contentStr);
+          if (parsed.keyByteLen === 1) globalKeyByteLen = 1;
+          for (const [k, v] of parsed.map.entries()) globalCMap.set(k, v);
+        } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
+          contentStreams.push(contentStr);
+        }
+      }
+
+      const cmapObj = { map: globalCMap, keyByteLen: globalKeyByteLen };
+      const pages = [];
+
+      for (const contentStr of contentStreams) {
+        const pageLines = [];
+        let currentLine = '';
+        let lastTmY = null;
+        const btEtRegex = /\bBT\b([\s\S]*?)\bET\b/g;
+        let btMatch;
+        while ((btMatch = btEtRegex.exec(contentStr)) !== null) {
+          const block = btMatch[1];
+          const tokenRegex =
+            /(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|')|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|\bT\*/g;
+          let tok;
+          while ((tok = tokenRegex.exec(block)) !== null) {
+            if (tok[6] !== undefined) {
+              const tmY = parseFloat(tok[6]);
+              if (lastTmY !== null && Math.abs(tmY - lastTmY) > 2 && currentLine.trim()) {
+                pageLines.push(currentLine);
+                currentLine = '';
+              }
+              lastTmY = tmY;
+            } else if (tok[7] !== undefined) {
+              const subRegex = /<([0-9A-Fa-f\s]+)>|\(([^()\\]*(?:\\.[^()\\]*)*)\)/g;
+              let sub;
+              while ((sub = subRegex.exec(tok[7])) !== null) {
+                if (sub[1] !== undefined) currentLine += decodeHexWithCMapClient(sub[1], cmapObj);
+                else if (sub[2] !== undefined) currentLine += sub[2];
+              }
+            } else if (tok[8] !== undefined) {
+              currentLine += decodeHexWithCMapClient(tok[8], cmapObj);
+            } else if (tok[9] !== undefined) {
+              currentLine += tok[9];
+            } else if (tok[10] !== undefined && tok[11] !== undefined) {
+              if (Math.abs(parseFloat(tok[11])) > 0.1 && currentLine.trim()) {
+                pageLines.push(currentLine);
+                currentLine = '';
+              }
+            } else if (currentLine.trim()) {
+              pageLines.push(currentLine);
+              currentLine = '';
+            }
+          }
+          if (currentLine.trim()) {
+            pageLines.push(currentLine);
+            currentLine = '';
+          }
+        }
+        if (pageLines.length > 0) pages.push(pageLines.join('\n'));
+      }
+
+      const rawFullText = pages.join('\n\n').trim();
+      if (rawFullText.replace(/\s+/g, '').length > 20) {
+        const reflowed = reflowPdfTextClient(pages, {
+          stripHeadersFooters: true,
+          mergeBrokenLines: true
+        });
+        const parsedTxt = parseTxtClient(reflowed.text || rawFullText, `${rawTitle}.txt`);
+        const chaptersWithRaw = parsedTxt.chapters.map((ch) => ({
+          ...ch,
+          rawLineContent: rawFullText
+        }));
+        return {
+          ...parsedTxt,
+          chapters: chaptersWithRaw,
+          format: 'pdf',
+          pdfReflowed: true,
+          pdfPageCount: Math.max(numpages, pages.length),
+          rawPdfUrl: blobUrl
+        };
+      }
+    } catch (_) {}
+
     return {
       title: rawTitle,
       originalTitle: rawTitle,
@@ -1376,7 +1770,7 @@
         } else if (bookMeta.format === 'mobi') {
           parsed = parseMobiClient(arrayBuf, bookMeta.filename);
         } else if (bookMeta.format === 'pdf') {
-          parsed = parsePdfClient(arrayBuf, bookMeta.filename);
+          parsed = await parsePdfClient(arrayBuf, bookMeta.filename);
         } else {
           parsed = parseTxtClient(decodeArrayBufferClient(arrayBuf), bookMeta.filename);
         }
@@ -1404,9 +1798,17 @@
         throw new Error('找不到該書籍資料');
       }
 
-      // Default to native PDF viewer if it's an image-only PDF (totalWords === 0), otherwise reflowable text mode
-      state.pdfNativeMode =
-        state.currentBook.format === 'pdf' && (state.currentBook.totalWords || 0) === 0;
+      // Default to 'reflow' (PDF 智慧重排) if the PDF has extractable text, or 'native' if image-only
+      if (state.currentBook.format === 'pdf') {
+        if ((state.currentBook.totalWords || 0) === 0) {
+          state.pdfViewMode = 'native';
+        } else {
+          const savedPref = state.settings.pdfReflowMode || 'reflow';
+          state.pdfViewMode = ['reflow', 'raw', 'native'].includes(savedPref) ? savedPref : 'reflow';
+        }
+      } else {
+        state.pdfViewMode = state.settings.pdfReflowMode === 'raw' ? 'raw' : 'reflow';
+      }
       updatePdfModeButtonUI();
 
       document.getElementById('reader-book-title').textContent = convertStr(
@@ -1425,15 +1827,73 @@
   function updatePdfModeButtonUI() {
     const btn = document.getElementById('reader-pdf-mode-btn');
     const txt = document.getElementById('reader-pdf-mode-text');
-    if (!btn || !txt) return;
+    const isPdf = Boolean(state.currentBook && state.currentBook.format === 'pdf');
+    const mode = state.pdfViewMode || 'reflow';
 
-    if (state.currentBook && state.currentBook.format === 'pdf' && state.currentBook.rawPdfUrl) {
-      btn.style.display = 'inline-flex';
-      btn.classList.toggle('btn-pill-active', Boolean(state.pdfNativeMode));
-      txt.textContent = state.pdfNativeMode ? '切換文字排版' : '原版 PDF';
-    } else {
-      btn.style.display = 'none';
+    if (btn && txt) {
+      if (isPdf) {
+        btn.style.display = 'inline-flex';
+        btn.classList.toggle('btn-pill-active', mode === 'reflow' || mode === 'native');
+        txt.textContent =
+          mode === 'reflow'
+            ? '📐 PDF 重排'
+            : mode === 'raw'
+            ? '📝 PDF 原行'
+            : '📄 原版 PDF';
+      } else {
+        btn.style.display = 'none';
+      }
     }
+
+    const reflowLabel = document.getElementById('pdf-reflow-label');
+    if (reflowLabel) {
+      reflowLabel.textContent =
+        mode === 'reflow'
+          ? '📐 智慧重排 (自動合併斷行)'
+          : mode === 'raw'
+          ? '📝 原始斷行'
+          : '📄 原版 PDF 檢視';
+    }
+
+    const nativeOptBtn = document.getElementById('pdf-native-opt-btn');
+    if (nativeOptBtn) {
+      nativeOptBtn.style.display = isPdf ? '' : 'none';
+    }
+
+    document.querySelectorAll('[data-pdf-reflow-opt]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.pdfReflowOpt === mode);
+    });
+  }
+
+  async function setPdfViewMode(newMode) {
+    const isPdf = Boolean(state.currentBook && state.currentBook.format === 'pdf');
+    if (newMode === 'native' && !isPdf) {
+      newMode = 'reflow';
+    }
+    state.pdfViewMode = newMode;
+    state.settings.pdfReflowMode = newMode;
+    updatePdfModeButtonUI();
+    pushCloudSync();
+
+    if (document.getElementById('reader-view').classList.contains('active') && state.currentChapter) {
+      const currentScroll = calculateCurrentScrollPercent();
+      await loadAndRenderChapter(state.currentChapter.index, currentScroll);
+    }
+
+    const toastMap = {
+      reflow: '📐 已切換至「PDF 智慧重排」：自動合併跨行斷句、過濾頁碼與頁眉，支援直橫排與字級縮放',
+      raw: '📝 已切換至「原始斷行」：保留每行原始換行與頁碼標記',
+      native: '📄 已切換至「原版 PDF 檢視模式」'
+    };
+    showToast(toastMap[newMode] || toastMap.reflow);
+  }
+
+  async function cyclePdfViewMode() {
+    const isPdf = Boolean(state.currentBook && state.currentBook.format === 'pdf');
+    const order = isPdf ? ['reflow', 'raw', 'native'] : ['reflow', 'raw'];
+    const currentIdx = order.indexOf(state.pdfViewMode || 'reflow');
+    const nextMode = order[(currentIdx + 1) % order.length];
+    await setPdfViewMode(nextMode);
   }
 
   async function loadAndRenderChapter(chapterIndex, targetScrollPercent = 0) {
@@ -1464,6 +1924,7 @@
         originalTitle: rawCh.originalTitle || rawCh.title,
         wordCount: rawCh.wordCount,
         content: convertStr(rawCh.content),
+        rawLineContent: rawCh.rawLineContent ? convertStr(rawCh.rawLineContent) : null,
         blocks: rawCh.blocks
           ? rawCh.blocks.map((b) =>
               b.type === 'image' ? b : { ...b, text: convertStr(b.text) }
@@ -1489,23 +1950,64 @@
     const bodyEl = document.getElementById('chapter-body');
     bodyEl.innerHTML = '';
 
-    // Check if Native PDF Viewer Mode is active
-    if (
-      state.currentBook.format === 'pdf' &&
-      state.currentBook.rawPdfUrl &&
-      state.pdfNativeMode
-    ) {
+    const isPdf = state.currentBook.format === 'pdf';
+    const pdfMode = state.pdfViewMode || 'reflow';
+
+    // Render interactive PDF Reflow / Raw / Native switcher bar at top of PDF chapters
+    if (isPdf) {
+      const pdfSrc =
+        state.currentBook.rawPdfUrl && state.currentBook.rawPdfUrl.startsWith('/api/')
+          ? `${getApiBase()}${state.currentBook.rawPdfUrl}`
+          : state.currentBook.rawPdfUrl || '';
+
+      const pdfBar = document.createElement('div');
+      pdfBar.className = 'pdf-reflow-banner';
+      pdfBar.style.cssText =
+        'display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem; margin: 0 0 1.25rem; padding: 0.55rem 0.85rem; border-radius: 10px; background: var(--bg-elevated); border: 1px solid var(--border-subtle); font-size: 0.8rem;';
+
+      const modeDesc =
+        pdfMode === 'reflow'
+          ? '📐 <strong>PDF 智慧重排模式</strong>（自動合併斷行、過濾頁碼，支援直橫排與字級縮放）'
+          : pdfMode === 'raw'
+          ? '📝 <strong>PDF 原始斷行模式</strong>（保留原始每行換行與頁碼標記）'
+          : `📄 <strong>原版 PDF 檢視模式</strong>${
+              state.currentBook.pdfPageCount ? `（共 ${state.currentBook.pdfPageCount} 頁）` : ''
+            }`;
+
+      pdfBar.innerHTML = `
+        <div style="color: var(--text-secondary);">${modeDesc}</div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem;">
+          <button type="button" class="btn ${pdfMode === 'reflow' ? 'btn-pill-active' : ''}" data-pdf-switch="reflow" style="padding: 0.22rem 0.6rem; font-size: 0.76rem;">📐 智慧重排</button>
+          <button type="button" class="btn ${pdfMode === 'raw' ? 'btn-pill-active' : ''}" data-pdf-switch="raw" style="padding: 0.22rem 0.6rem; font-size: 0.76rem;">📝 原始斷行</button>
+          ${
+            pdfSrc
+              ? `<button type="button" class="btn ${pdfMode === 'native' ? 'btn-pill-active' : ''}" data-pdf-switch="native" style="padding: 0.22rem 0.6rem; font-size: 0.76rem;">📄 原版 PDF</button>
+                 <a href="${escapeHtml(pdfSrc)}" target="_blank" rel="noopener" style="margin-left: 0.25rem; color: var(--accent); font-weight: 600; text-decoration: none; font-size: 0.76rem;">↗ 新分頁開啟</a>`
+              : ''
+          }
+        </div>
+      `;
+
+      pdfBar.querySelectorAll('[data-pdf-switch]').forEach((switchBtn) => {
+        switchBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setPdfViewMode(switchBtn.dataset.pdfSwitch);
+        });
+      });
+
+      bodyEl.appendChild(pdfBar);
+    }
+
+    // 1. Native PDF Viewer Mode
+    if (isPdf && state.currentBook.rawPdfUrl && pdfMode === 'native') {
       const pdfSrc = state.currentBook.rawPdfUrl.startsWith('/api/')
         ? `${getApiBase()}${state.currentBook.rawPdfUrl}`
         : state.currentBook.rawPdfUrl;
 
       const pdfWrapper = document.createElement('div');
-      pdfWrapper.style.cssText = 'margin: 0.5rem 0 1.5rem; border-radius: 12px; overflow: hidden; border: 1px solid var(--border-subtle); background: #2a2a2a;';
+      pdfWrapper.style.cssText =
+        'margin: 0.25rem 0 1.5rem; border-radius: 12px; overflow: hidden; border: 1px solid var(--border-subtle); background: #2a2a2a;';
       pdfWrapper.innerHTML = `
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.9rem; background: var(--bg-elevated); border-bottom: 1px solid var(--border-subtle); font-size: 0.82rem;">
-          <span>📄 原版 PDF 檢視模式${state.currentBook.pdfPageCount ? `（共 ${state.currentBook.pdfPageCount} 頁）` : ''}</span>
-          <a href="${escapeHtml(pdfSrc)}" target="_blank" rel="noopener" style="color: var(--accent); font-weight: 600; text-decoration: none;">↗ 在新分頁全螢幕開啟 PDF</a>
-        </div>
         <iframe
           src="${escapeHtml(pdfSrc)}"
           style="width: 100%; height: 80vh; border: none; display: block;"
@@ -1514,6 +2016,7 @@
       `;
       bodyEl.appendChild(pdfWrapper);
     } else if (chapterData.blocks && Array.isArray(chapterData.blocks) && chapterData.blocks.length > 0) {
+      // 2. Rich EPUB blocks
       chapterData.blocks.forEach((block) => {
         if (block.type === 'image' && block.src) {
           const fig = document.createElement('div');
@@ -1525,7 +2028,6 @@
           fig.appendChild(img);
           bodyEl.appendChild(fig);
         } else if (block.text) {
-          // Avoid repeating the chapter title if the first heading matches
           if (block.type === 'heading' && block.text.trim() === displayChTitle.trim()) {
             return;
           }
@@ -1534,14 +2036,62 @@
           bodyEl.appendChild(el);
         }
       });
-    } else {
-      const paragraphs = (chapterData.content || '').split(/\n+/);
-      paragraphs.forEach((para) => {
-        const trimmed = para.trim();
+    } else if (isPdf && (state.currentBook.totalWords || 0) === 0 && (chapterData.wordCount || 0) === 0) {
+      // Scanned / Image-only PDF notice when user manually clicked Reflow/Raw
+      const notice = document.createElement('div');
+      notice.style.cssText =
+        'padding: 1.5rem; border-radius: 10px; background: var(--bg-subtle); border: 1px dashed var(--border-subtle); text-align: center; color: var(--text-secondary);';
+      notice.innerHTML = `
+        <p style="margin-bottom: 0.75rem; text-indent: 0;">此 PDF 為純掃描圖片檔（未內嵌文字圖層），無法直接重排文字。</p>
+        <button type="button" class="btn btn-primary" id="fallback-native-pdf-btn">📄 切換回原版 PDF 檢視器</button>
+      `;
+      bodyEl.appendChild(notice);
+      const fbBtn = notice.querySelector('#fallback-native-pdf-btn');
+      if (fbBtn) {
+        fbBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setPdfViewMode('native');
+        });
+      }
+    } else if (pdfMode === 'raw') {
+      // 3. Raw Line-Break Mode (preserves original PDF/TXT line breaks without merging)
+      const sourceText = chapterData.rawLineContent || chapterData.content || '';
+      const rawLines = sourceText.split(/\n+/);
+      rawLines.forEach((line) => {
+        const trimmed = line.trim();
         if (!trimmed) return;
         const p = document.createElement('p');
         p.textContent = trimmed;
         bodyEl.appendChild(p);
+      });
+    } else {
+      // 4. Smart Reflow Mode (merges broken lines into natural paragraphs, detects sub-headings)
+      const rawText = chapterData.content || '';
+      const reflowedResult = reflowPdfTextClient(rawText, {
+        stripHeadersFooters: isPdf,
+        mergeBrokenLines: true
+      });
+      const paragraphs =
+        reflowedResult.paragraphs.length > 0
+          ? reflowedResult.paragraphs
+          : rawText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+
+      paragraphs.forEach((para) => {
+        const trimmed = para.trim();
+        if (!trimmed) return;
+        if (
+          PDF_CHAPTER_HEADING_REGEX_CLIENT.test(trimmed) &&
+          trimmed.length <= 50 &&
+          trimmed !== displayChTitle.trim()
+        ) {
+          const h3 = document.createElement('h3');
+          h3.textContent = trimmed;
+          bodyEl.appendChild(h3);
+        } else {
+          const p = document.createElement('p');
+          p.textContent = trimmed;
+          bodyEl.appendChild(p);
+        }
       });
     }
 
@@ -2287,6 +2837,7 @@
     if (fsDisplay) fsDisplay.textContent = `${s.fontSize}px`;
     if (fsVal) fsVal.textContent = `${s.fontSize} px`;
 
+    updatePdfModeButtonUI();
     updateGlobalConvertButtonUI();
   }
 
@@ -2464,19 +3015,11 @@
       readerDirToggle.addEventListener('click', toggleWritingMode);
     }
 
-    // PDF Native Viewer / Text Extraction Mode Toggle
+    // PDF Smart Reflow / Raw Line / Native Viewer Mode Toggle
     const pdfModeBtn = document.getElementById('reader-pdf-mode-btn');
     if (pdfModeBtn) {
-      pdfModeBtn.addEventListener('click', async () => {
-        if (!state.currentBook || state.currentBook.format !== 'pdf') return;
-        state.pdfNativeMode = !state.pdfNativeMode;
-        updatePdfModeButtonUI();
-        await loadAndRenderChapter(state.currentChapter ? state.currentChapter.index : 0, 0);
-        showToast(
-          state.pdfNativeMode
-            ? '📄 已切換為「原版 PDF 檢視模式」'
-            : '📖 已切換為「文字排版模式（支援自動簡轉繁）」'
-        );
+      pdfModeBtn.addEventListener('click', () => {
+        cyclePdfViewMode();
       });
     }
 
@@ -3079,6 +3622,12 @@
       });
     });
 
+    document.querySelectorAll('[data-pdf-reflow-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setPdfViewMode(btn.dataset.pdfReflowOpt);
+      });
+    });
+
     document.querySelectorAll('[data-flip-opt]').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.settings.clickFlip = btn.dataset.flipOpt;
@@ -3346,7 +3895,7 @@
           if (ext === 'epub') {
             parsed = await parseEpubClient(arrayBuffer, file.name);
           } else if (ext === 'pdf') {
-            parsed = parsePdfClient(arrayBuffer, file.name);
+            parsed = await parsePdfClient(arrayBuffer, file.name);
           } else if (ext === 'mobi') {
             parsed = parseMobiClient(arrayBuffer, file.name);
           } else {

@@ -917,91 +917,618 @@ function parseMobiBuffer(buffer, filename = '未命名小說.mobi') {
   }
 }
 
+const PDF_CHAPTER_HEADING_REGEX =
+  /^(?:第\s*[零一二三四五六七八九十百千万萬千0-9]+\s*[章節节回卷部篇集話话]|(?:Chapter|CHAPTER|Part|PART|Section|Book)\s+[0-9IVXLCDM]+|(?:序章|楔子|引子|プロローグ|前言|自序|導讀|导读|後記|后记|尾聲|尾声|番外|附錄|附录)(?:\s|$|[：:—\-])|[一二三四五六七八九十]+[、.．]\s*\S+)/;
+
+const PAGE_NUMBER_LINE_REGEX =
+  /^(?:[-—–~～·•\s]*\d{1,5}[-—–~～·•\s]*|第\s*\d{1,5}\s*[頁页](?:\s*[\/／]\s*共?\s*\d{1,5}\s*[頁页])?|【\s*第\s*\d{1,5}\s*[頁页]\s*】|Page\s+\d{1,5}(?:\s+of\s+\d{1,5})?)$/i;
+
+const TERMINAL_PUNCT_REGEX = /[。！？!?…⋯」』”"》）)\.!;:]$/;
+const LIST_OR_DIALOGUE_START_REGEX =
+  /^(?:[「『“"（(【《]|[-•·*]\s+|\d{1,3}[.、)）]\s*|[①②③④⑤⑥⑦⑧⑨⑩])/;
+
 /**
- * Built-in zero-dependency PDF text & page count extractor fallback (using Node native zlib)
- * Used automatically if the NAS environment did not run `npm install pdf-parse`.
+ * Compute visual width of a string (CJK = 2, ASCII = 1)
+ */
+function getVisualWidth(str) {
+  let w = 0;
+  for (let i = 0; i < str.length; i++) {
+    w += str.charCodeAt(i) > 0xff ? 2 : 1;
+  }
+  return w;
+}
+
+/**
+ * Join two lines that were split by PDF fixed-width layout
+ */
+function joinReflowedLines(prev, next) {
+  // Handle English word hyphenation across lines: "inter-" + "national" -> "international"
+  if (/[a-zA-Z]-$/.test(prev) && /^[a-z]/.test(next)) {
+    return prev.slice(0, -1) + next;
+  }
+  // If both boundary characters are ASCII letters/numbers/punctuation, insert a space
+  const lastChar = prev.charAt(prev.length - 1);
+  const firstChar = next.charAt(0);
+  if (/[a-zA-Z0-9,.;:?!)]/.test(lastChar) && /[a-zA-Z0-9(]/.test(firstChar)) {
+    return `${prev} ${next}`;
+  }
+  // For CJK text, join directly without space
+  return prev + next;
+}
+
+/**
+ * Remove artificial single-space gaps between individual CJK characters caused by PDF TJ positioning
+ * (e.g. "他 走 進 了 房 間" -> "他走進了房間"), while preserving normal spaces in titles like "第一章 初入江湖".
+ */
+function normalizePdfLineSpacing(line) {
+  const cjkChar = '[\\u2E80-\\u9FFF\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFFEF]';
+  const spacedSingleCjkRegex = new RegExp(`(?:^|\\s)${cjkChar}\\s+${cjkChar}\\s+${cjkChar}`, '');
+  if (!spacedSingleCjkRegex.test(line)) {
+    return line;
+  }
+  const cjkClass =
+    '[\\u2E80-\\u9FFF\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFFEF「」『』《》〈〉【】〔〕（）—…]';
+  const re = new RegExp(`(${cjkClass})[ \\t]+(?=${cjkClass})`, 'g');
+  return line.replace(re, '$1');
+}
+
+/**
+ * Smart PDF Reflow Engine:
+ * Reflows an array of per-page PDF strings or a single PDF text block into clean, natural paragraphs:
+ * 1. Detects and strips repeated running page headers/footers across pages.
+ * 2. Strips standalone page number markers (- 12 -, 第 12 頁, 【第 12 頁】, Page 12).
+ * 3. Merges mid-sentence hard line breaks caused by fixed-width PDF columns while preserving
+ *    true paragraph breaks, chapter headings, dialogue lines, and indented paragraphs.
+ */
+function reflowPdfText(pagesOrText, options = {}) {
+  const { stripHeadersFooters = true, mergeBrokenLines = true } = options;
+
+  const rawPages = Array.isArray(pagesOrText)
+    ? pagesOrText.map((p) => String(p || ''))
+    : String(pagesOrText || '').split(/\f|\n(?=【第\s*\d+\s*[頁页]】)/);
+
+  let removedArtifacts = 0;
+
+  const pageLinesList = rawPages.map((pageStr) =>
+    pageStr
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .split('\n')
+  );
+
+  // Detect repeated running headers/footers across 3+ pages
+  const repeatedHeaderFooterSet = new Set();
+  if (stripHeadersFooters && pageLinesList.length >= 3) {
+    const edgeCounts = new Map();
+    for (const lines of pageLinesList) {
+      const nonEmpty = lines.map((l) => l.trim()).filter(Boolean);
+      if (nonEmpty.length === 0) continue;
+      const first = nonEmpty[0];
+      const last = nonEmpty[nonEmpty.length - 1];
+      const candidates = new Set([first, last]);
+      for (const c of candidates) {
+        if (c.length <= 45 && !PDF_CHAPTER_HEADING_REGEX.test(c)) {
+          edgeCounts.set(c, (edgeCounts.get(c) || 0) + 1);
+        }
+      }
+    }
+    const threshold = Math.max(2, Math.ceil(pageLinesList.length * 0.4));
+    for (const [lineText, count] of edgeCounts.entries()) {
+      if (count >= threshold) {
+        repeatedHeaderFooterSet.add(lineText);
+      }
+    }
+  }
+
+  const cleanedLines = [];
+  let rawLineCount = 0;
+
+  for (const lines of pageLinesList) {
+    let firstIdx = -1;
+    let lastIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim()) {
+        if (firstIdx === -1) firstIdx = i;
+        lastIdx = i;
+      }
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      rawLineCount++;
+      const rawLine = lines[i];
+      const trimmed = rawLine.trim();
+
+      if (!trimmed) {
+        cleanedLines.push({ raw: '', trimmed: '', isBlank: true, isIndented: false });
+        continue;
+      }
+
+      if (stripHeadersFooters) {
+        if (PAGE_NUMBER_LINE_REGEX.test(trimmed)) {
+          removedArtifacts++;
+          continue;
+        }
+        if ((i === firstIdx || i === lastIdx) && repeatedHeaderFooterSet.has(trimmed)) {
+          removedArtifacts++;
+          continue;
+        }
+      }
+
+      const normalizedTrimmed = normalizePdfLineSpacing(trimmed);
+      const isIndented = /^(?:　+|\s{2,}|\t+)/.test(rawLine);
+
+      cleanedLines.push({
+        raw: rawLine,
+        trimmed: normalizedTrimmed,
+        isBlank: false,
+        isIndented
+      });
+    }
+  }
+
+  if (!mergeBrokenLines) {
+    const paragraphs = cleanedLines.filter((l) => !l.isBlank).map((l) => l.trimmed);
+    return {
+      paragraphs,
+      text: paragraphs.join('\n\n'),
+      stats: {
+        rawLines: rawLineCount,
+        reflowedParagraphs: paragraphs.length,
+        removedArtifacts
+      }
+    };
+  }
+
+  // Compute typical full-line visual width (75th percentile)
+  const lengths = cleanedLines
+    .filter((l) => !l.isBlank && l.trimmed.length > 5)
+    .map((l) => getVisualWidth(l.trimmed))
+    .sort((a, b) => a - b);
+
+  const typicalFullWidth =
+    lengths.length > 0
+      ? lengths[Math.min(lengths.length - 1, Math.floor(lengths.length * 0.75))]
+      : 60;
+
+  const paragraphs = [];
+  let currentPara = '';
+  let prevLineWidth = 0;
+
+  for (let i = 0; i < cleanedLines.length; i++) {
+    const item = cleanedLines[i];
+
+    if (item.isBlank) {
+      if (currentPara) {
+        paragraphs.push(currentPara);
+        currentPara = '';
+        prevLineWidth = 0;
+      }
+      continue;
+    }
+
+    const line = item.trimmed;
+    const lineWidth = getVisualWidth(line);
+    const isHeading = PDF_CHAPTER_HEADING_REGEX.test(line) && line.length <= 50;
+
+    if (!currentPara) {
+      currentPara = line;
+      prevLineWidth = lineWidth;
+      if (isHeading) {
+        paragraphs.push(currentPara);
+        currentPara = '';
+        prevLineWidth = 0;
+      }
+      continue;
+    }
+
+    const prevEndsWithTerminal = TERMINAL_PUNCT_REGEX.test(currentPara);
+    const prevWasShortLine = prevLineWidth < typicalFullWidth * 0.78;
+    const nextStartsNewBlock =
+      isHeading || item.isIndented || LIST_OR_DIALOGUE_START_REGEX.test(line);
+
+    const shouldStartNewParagraph =
+      isHeading ||
+      item.isIndented ||
+      (prevEndsWithTerminal && (prevWasShortLine || nextStartsNewBlock));
+
+    if (shouldStartNewParagraph) {
+      paragraphs.push(currentPara);
+      currentPara = line;
+      prevLineWidth = lineWidth;
+      if (isHeading) {
+        paragraphs.push(currentPara);
+        currentPara = '';
+        prevLineWidth = 0;
+      }
+    } else {
+      currentPara = joinReflowedLines(currentPara, line);
+      prevLineWidth = lineWidth;
+    }
+  }
+
+  if (currentPara) {
+    paragraphs.push(currentPara);
+  }
+
+  return {
+    paragraphs,
+    text: paragraphs.join('\n\n'),
+    stats: {
+      rawLines: rawLineCount,
+      reflowedParagraphs: paragraphs.length,
+      removedArtifacts
+    }
+  };
+}
+
+/**
+ * Parse a ToUnicode CMap stream (beginbfchar / beginbfrange) into a Map<code, unicodeStr>
+ */
+function parseToUnicodeCMap(cmapStr) {
+  const map = new Map();
+  let keyByteLen = 2;
+
+  const bfcharRegex = /beginbfchar([\s\S]*?)endbfchar/g;
+  let match;
+  while ((match = bfcharRegex.exec(cmapStr)) !== null) {
+    const body = match[1];
+    const pairRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+    let pair;
+    while ((pair = pairRegex.exec(body)) !== null) {
+      const srcHex = pair[1];
+      const dstHex = pair[2];
+      if (srcHex.length === 2) keyByteLen = 1;
+      const code = parseInt(srcHex, 16);
+      const unicodeStr = decodeHexUtf16Be(dstHex);
+      if (!Number.isNaN(code) && unicodeStr) {
+        map.set(code, unicodeStr);
+      }
+    }
+  }
+
+  const bfrangeRegex = /beginbfrange([\s\S]*?)endbfrange/g;
+  while ((match = bfrangeRegex.exec(cmapStr)) !== null) {
+    const body = match[1];
+    const rangeDirectRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+    let r;
+    while ((r = rangeDirectRegex.exec(body)) !== null) {
+      const startCode = parseInt(r[1], 16);
+      const endCode = parseInt(r[2], 16);
+      const dstStartHex = r[3];
+      if (r[1].length === 2) keyByteLen = 1;
+      const baseCodePoint = parseInt(dstStartHex, 16);
+      if (!Number.isNaN(startCode) && !Number.isNaN(endCode) && !Number.isNaN(baseCodePoint)) {
+        const limit = Math.min(endCode, startCode + 4096);
+        for (let c = startCode; c <= limit; c++) {
+          map.set(c, String.fromCodePoint(baseCodePoint + (c - startCode)));
+        }
+      }
+    }
+    const rangeArrayRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*\[([\s\S]*?)\]/g;
+    while ((r = rangeArrayRegex.exec(body)) !== null) {
+      const startCode = parseInt(r[1], 16);
+      const endCode = parseInt(r[2], 16);
+      const arrBody = r[3];
+      const items = arrBody.match(/<([0-9A-Fa-f]+)>/g) || [];
+      for (let i = 0; i < items.length && startCode + i <= endCode; i++) {
+        const hex = items[i].slice(1, -1);
+        map.set(startCode + i, decodeHexUtf16Be(hex));
+      }
+    }
+  }
+
+  return { map, keyByteLen };
+}
+
+function decodeHexUtf16Be(hex) {
+  if (!hex) return '';
+  const clean = hex.replace(/\s+/g, '');
+  if (clean.length === 2) {
+    return String.fromCharCode(parseInt(clean, 16));
+  }
+  const buf = Buffer.from(clean.length % 2 === 0 ? clean : '0' + clean, 'hex');
+  let out = '';
+  for (let i = 0; i + 1 < buf.length; i += 2) {
+    const code = (buf[i] << 8) | buf[i + 1];
+    if (code === 0xfeff) continue;
+    out += String.fromCharCode(code);
+  }
+  return out;
+}
+
+function decodeHexWithCMap(hexStr, cmapObj) {
+  const clean = hexStr.replace(/\s+/g, '');
+  if (!clean) return '';
+  if (clean.toUpperCase().startsWith('FEFF')) {
+    return decodeHexUtf16Be(clean.slice(4));
+  }
+  if (cmapObj && cmapObj.map && cmapObj.map.size > 0) {
+    const step = cmapObj.keyByteLen === 1 ? 2 : 4;
+    let out = '';
+    for (let i = 0; i < clean.length; i += step) {
+      const slice = clean.slice(i, i + step);
+      const code = parseInt(slice, 16);
+      if (cmapObj.map.has(code)) {
+        out += cmapObj.map.get(code);
+      } else if (step === 4 && slice.length === 4) {
+        const hi = parseInt(slice.slice(0, 2), 16);
+        const lo = parseInt(slice.slice(2, 4), 16);
+        if (cmapObj.map.has(hi) && cmapObj.map.has(lo)) {
+          out += cmapObj.map.get(hi) + cmapObj.map.get(lo);
+        } else if (code >= 0x20) {
+          out += String.fromCharCode(code);
+        }
+      }
+    }
+    return out;
+  }
+  if (clean.length % 4 === 0) {
+    return decodeHexUtf16Be(clean);
+  }
+  return Buffer.from(clean, 'hex').toString('utf8');
+}
+
+function unescapePdfLiteral(str, cmapObj) {
+  const raw = str
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
+
+  if (cmapObj && cmapObj.map && cmapObj.map.size > 0 && cmapObj.keyByteLen === 1) {
+    let mapped = '';
+    for (let i = 0; i < raw.length; i++) {
+      const code = raw.charCodeAt(i);
+      mapped += cmapObj.map.get(code) || raw[i];
+    }
+    return mapped;
+  }
+  return raw;
+}
+
+function inflatePdfStream(rawStreamLatin1) {
+  const buf = Buffer.from(rawStreamLatin1, 'latin1');
+  try {
+    return zlib.inflateSync(buf).toString('latin1');
+  } catch (_) {
+    try {
+      return zlib.inflateRawSync(buf.subarray(2)).toString('latin1');
+    } catch (_2) {
+      try {
+        return zlib.inflateRawSync(buf).toString('latin1');
+      } catch (_3) {
+        return rawStreamLatin1;
+      }
+    }
+  }
+}
+
+/**
+ * Built-in zero-dependency PDF text, CMap & page layout extractor (using Node native zlib)
+ * Supports ToUnicode CMaps (beginbfchar / beginbfrange), per-font CMap switching,
+ * Tm text matrix / Td / TD / T* line positioning, and TJ / Tj text arrays.
  */
 function extractPdfBuiltin(buffer) {
   const rawLatin1 = buffer.toString('latin1');
   const pageMatches = rawLatin1.match(/\/Type\s*\/Page\b(?!s)/g);
   const numpages = pageMatches ? pageMatches.length : 1;
 
-  const textChunks = [];
-  const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
-  let match;
-  while ((match = streamRegex.exec(rawLatin1)) !== null) {
-    const streamBody = Buffer.from(match[1], 'latin1');
-    let contentStr = '';
-    try {
-      contentStr = zlib.inflateSync(streamBody).toString('latin1');
-    } catch (_) {
-      contentStr = match[1];
-    }
-    if (!contentStr.includes('BT') || !contentStr.includes('ET')) continue;
+  const cmapsByObjId = new Map();
+  const fontObjToCmapObj = new Map();
+  const resourceNameToFontObj = new Map();
+  const globalCMap = new Map();
+  let globalKeyByteLen = 2;
+  const contentStreams = [];
 
-    // Extract UTF-16BE hex strings <FEFF...> or literal strings (...)
-    const hexMatches = contentStr.match(/<([0-9A-Fa-f]{4,})>/g);
-    if (hexMatches) {
-      for (const h of hexMatches) {
-        const hex = h.slice(1, -1);
-        if (hex.toUpperCase().startsWith('FEFF')) {
-          const buf = Buffer.from(hex.slice(4), 'hex');
-          for (let i = 0; i + 1 < buf.length; i += 2) {
-            const code = (buf[i] << 8) | buf[i + 1];
-            if (code >= 0x20) textChunks.push(String.fromCharCode(code));
-          }
-        }
+  const scanDictMappings = (dictStr, objId = null) => {
+    if (objId !== null) {
+      const toUniMatch = dictStr.match(/\/ToUnicode\s+(\d+)\s+\d+\s+R/);
+      if (toUniMatch) {
+        fontObjToCmapObj.set(objId, parseInt(toUniMatch[1], 10));
       }
     }
-    const litMatches = contentStr.match(/\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*T[jJ]/g);
-    if (litMatches) {
-      for (const l of litMatches) {
-        const inner = l.replace(/\)\s*T[jJ]$/, '').slice(1);
-        textChunks.push(inner);
+    const fontDictRegex = /\/([A-Za-z0-9_.+-]+)\s+(\d+)\s+\d+\s+R/g;
+    let fdMatch;
+    while ((fdMatch = fontDictRegex.exec(dictStr)) !== null) {
+      const key = fdMatch[1];
+      if (
+        ![
+          'Type',
+          'Parent',
+          'Resources',
+          'Contents',
+          'MediaBox',
+          'CropBox',
+          'ToUnicode',
+          'FontDescriptor',
+          'BaseFont',
+          'Encoding',
+          'DescendantFonts'
+        ].includes(key)
+      ) {
+        resourceNameToFontObj.set(key, parseInt(fdMatch[2], 10));
+      }
+    }
+  };
+
+  const objRegex = /(\d+)\s+\d+\s+obj\b([\s\S]*?)endobj/g;
+  let objMatch;
+  while ((objMatch = objRegex.exec(rawLatin1)) !== null) {
+    const objId = parseInt(objMatch[1], 10);
+    const objBody = objMatch[2];
+    scanDictMappings(objBody, objId);
+
+    const streamMatch = objBody.match(/stream(?:\r\n|\n)([\s\S]*?)endstream/);
+    if (streamMatch) {
+      const contentStr = inflatePdfStream(streamMatch[1]);
+      if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
+        const parsedCmap = parseToUnicodeCMap(contentStr);
+        cmapsByObjId.set(objId, parsedCmap);
+        if (parsedCmap.keyByteLen === 1) globalKeyByteLen = 1;
+        for (const [k, v] of parsedCmap.map.entries()) {
+          globalCMap.set(k, v);
+        }
+      } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
+        contentStreams.push(contentStr);
+      } else if (contentStr.includes('/ToUnicode') || contentStr.includes('/Font')) {
+        scanDictMappings(contentStr, null);
       }
     }
   }
 
+  if (contentStreams.length === 0) {
+    const streamRegex = /stream(?:\r\n|\n)([\s\S]*?)endstream/g;
+    let match;
+    while ((match = streamRegex.exec(rawLatin1)) !== null) {
+      const contentStr = inflatePdfStream(match[1]);
+      if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
+        const parsedCmap = parseToUnicodeCMap(contentStr);
+        if (parsedCmap.keyByteLen === 1) globalKeyByteLen = 1;
+        for (const [k, v] of parsedCmap.map.entries()) {
+          globalCMap.set(k, v);
+        }
+      } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
+        contentStreams.push(contentStr);
+      }
+    }
+  }
+
+  const globalCmapObj = { map: globalCMap, keyByteLen: globalKeyByteLen };
+  const pages = [];
+
+  for (const contentStr of contentStreams) {
+    const pageLines = [];
+    let currentLine = '';
+    let activeCmapObj = globalCmapObj;
+    let lastTmY = null;
+
+    const btEtRegex = /\bBT\b([\s\S]*?)\bET\b/g;
+    let btMatch;
+    while ((btMatch = btEtRegex.exec(contentStr)) !== null) {
+      const block = btMatch[1];
+      const tokenRegex =
+        /\/([A-Za-z0-9_.+-]+)\s+[-+]?\d+(?:\.\d+)?\s+Tf\b|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|')|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|\bT\*/g;
+      let tok;
+      while ((tok = tokenRegex.exec(block)) !== null) {
+        if (tok[1] !== undefined) {
+          const fontName = tok[1];
+          const fontObjId = resourceNameToFontObj.get(fontName);
+          const cmapObjId = fontObjId ? fontObjToCmapObj.get(fontObjId) : null;
+          if (cmapObjId && cmapsByObjId.has(cmapObjId)) {
+            activeCmapObj = cmapsByObjId.get(cmapObjId);
+          } else {
+            activeCmapObj = globalCmapObj;
+          }
+        } else if (tok[7] !== undefined) {
+          const tmY = parseFloat(tok[7]);
+          if (lastTmY !== null && Math.abs(tmY - lastTmY) > 2 && currentLine.trim()) {
+            pageLines.push(currentLine);
+            currentLine = '';
+          }
+          lastTmY = tmY;
+        } else if (tok[8] !== undefined) {
+          const arrStr = tok[8];
+          const subRegex = /<([0-9A-Fa-f\s]+)>|\(([^()\\]*(?:\\.[^()\\]*)*)\)|(-?\d+(?:\.\d+)?)/g;
+          let sub;
+          while ((sub = subRegex.exec(arrStr)) !== null) {
+            if (sub[1] !== undefined) {
+              currentLine += decodeHexWithCMap(sub[1], activeCmapObj);
+            } else if (sub[2] !== undefined) {
+              currentLine += unescapePdfLiteral(sub[2], activeCmapObj);
+            } else if (sub[3] !== undefined) {
+              const kern = parseFloat(sub[3]);
+              if (kern < -180 && currentLine && !currentLine.endsWith(' ')) {
+                currentLine += ' ';
+              }
+            }
+          }
+        } else if (tok[9] !== undefined) {
+          currentLine += decodeHexWithCMap(tok[9], activeCmapObj);
+        } else if (tok[10] !== undefined) {
+          currentLine += unescapePdfLiteral(tok[10], activeCmapObj);
+        } else if (tok[11] !== undefined && tok[12] !== undefined) {
+          const ty = parseFloat(tok[12]);
+          if (Math.abs(ty) > 0.1 && currentLine.trim()) {
+            pageLines.push(currentLine);
+            currentLine = '';
+          }
+        } else {
+          if (currentLine.trim()) {
+            pageLines.push(currentLine);
+            currentLine = '';
+          }
+        }
+      }
+      if (currentLine.trim()) {
+        pageLines.push(currentLine);
+        currentLine = '';
+      }
+    }
+
+    if (pageLines.length > 0) {
+      pages.push(pageLines.join('\n'));
+    }
+  }
+
   return {
-    numpages,
+    numpages: Math.max(numpages, pages.length),
     info: {},
-    text: textChunks.join('\n')
+    pages,
+    text: pages.join('\n\n')
   };
 }
 
 /**
- * Parse a .pdf buffer into metadata and chapters (with automatic Simplified/Traditional conversion support
- * and optional native PDF viewer stream URL).
+ * Parse a .pdf buffer into metadata and chapters (with built-in Smart PDF Reflow,
+ * Simplified/Traditional conversion support, raw line fallback, and native PDF viewer stream URL).
  */
 async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId = '') {
   const rawTitle = path.basename(filename, path.extname(filename));
 
   try {
-    const pages = [];
-    let data;
+    let pages = [];
+    let data = null;
     if (typeof pdfParse === 'function') {
-      const options = {
-        pagerender: function (pageData) {
-          return pageData.getTextContent().then(function (textContent) {
-            let lastY = null;
-            let pageText = '';
-            for (const item of textContent.items) {
-              if (lastY === item.transform[5] || lastY === null) {
-                pageText += item.str;
-              } else {
-                pageText += '\n' + item.str;
+      try {
+        const options = {
+          pagerender: function (pageData) {
+            return pageData.getTextContent().then(function (textContent) {
+              let lastY = null;
+              let pageText = '';
+              for (const item of textContent.items) {
+                if (lastY === item.transform[5] || lastY === null) {
+                  pageText += item.str;
+                } else {
+                  pageText += '\n' + item.str;
+                }
+                lastY = item.transform[5];
               }
-              lastY = item.transform[5];
-            }
-            pages.push(pageText.trim());
-            return pageText;
-          });
-        }
-      };
-      data = await pdfParse(buffer, options);
-    } else {
-      data = extractPdfBuiltin(buffer);
+              pages.push(pageText.trim());
+              return pageText;
+            });
+          }
+        };
+        data = await pdfParse(buffer, options);
+      } catch (_) {
+        data = null;
+        pages = [];
+      }
     }
+
+    const pdfParseTextLen = (pages.join('') || (data && data.text) || '').replace(/\s+/g, '').length;
+    if (!data || pdfParseTextLen <= 20) {
+      const builtinData = extractPdfBuiltin(buffer);
+      if (!data || (builtinData.text || '').replace(/\s+/g, '').length > pdfParseTextLen) {
+        data = builtinData;
+        if (Array.isArray(builtinData.pages) && builtinData.pages.length > 0) {
+          pages = builtinData.pages;
+        }
+      }
+    }
+
     const infoTitle =
       data.info && typeof data.info.Title === 'string' && data.info.Title.trim()
         ? data.info.Title.trim()
@@ -1011,26 +1538,43 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
         ? data.info.Author.trim()
         : '佚名';
 
-    const fullText = pages.length > 0 ? pages.join('\n\n') : (data.text || '').trim();
-    const totalChars = fullText.replace(/\s+/g, '').length;
+    const rawFullText = pages.length > 0 ? pages.join('\n\n') : (data.text || '').trim();
+    const totalChars = rawFullText.replace(/\s+/g, '').length;
 
-    // If PDF contains extractable text (> 50 chars), try splitting by chapters first, or group by 10 pages per chapter
-    if (totalChars > 50) {
-      const txtParsed = parseTxtBuffer(Buffer.from(fullText, 'utf8'), `${infoTitle}.txt`);
+    // If PDF contains extractable text (> 20 chars), apply Smart PDF Reflow
+    if (totalChars > 20) {
+      const fullReflow = reflowPdfText(pages.length > 0 ? pages : rawFullText, {
+        stripHeadersFooters: true,
+        mergeBrokenLines: true
+      });
+      const reflowedFullText = fullReflow.text || rawFullText;
 
-      // If standard chapter headings were detected (more than 1 chapter), use them directly!
+      const txtParsed = parseTxtBuffer(Buffer.from(reflowedFullText, 'utf8'), `${infoTitle}.txt`);
+      const rawTxtParsed = parseTxtBuffer(Buffer.from(rawFullText, 'utf8'), `${infoTitle}.txt`);
+
+      // If standard chapter headings were detected (more than 1 chapter), use them with reflowed content!
       if (txtParsed.chapters.length > 1) {
+        const chaptersWithRaw = txtParsed.chapters.map((ch, idx) => ({
+          ...ch,
+          rawLineContent:
+            rawTxtParsed.chapters[idx] && rawTxtParsed.chapters[idx].content
+              ? rawTxtParsed.chapters[idx].content
+              : ch.content
+        }));
         return {
           ...txtParsed,
+          chapters: chaptersWithRaw,
           title: infoTitle,
           author: infoAuthor !== '佚名' ? infoAuthor : txtParsed.author,
           format: 'pdf',
+          pdfReflowed: true,
+          pdfReflowStats: fullReflow.stats,
           pdfPageCount: data.numpages || pages.length,
           rawPdfUrl: bookId ? `/api/books/${encodeURIComponent(bookId)}/raw` : null
         };
       }
 
-      // Otherwise group every 10 PDF pages into a structured chapter for smooth reading
+      // Otherwise group every 10 PDF pages into a structured chapter (with both Reflowed & Raw Line modes)
       if (pages.length > 1) {
         const PAGES_PER_CHAPTER = 10;
         const chapters = [];
@@ -1038,19 +1582,28 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
           const slice = pages.slice(i, i + PAGES_PER_CHAPTER);
           const startPage = i + 1;
           const endPage = Math.min(pages.length, i + PAGES_PER_CHAPTER);
-          const joined = slice
+
+          const rawJoined = slice
             .map((pText, idx) => `【第 ${startPage + idx} 頁】\n${pText}`)
             .join('\n\n')
             .trim();
-          if (!joined) continue;
+          if (!rawJoined) continue;
+
+          const sliceReflow = reflowPdfText(slice, {
+            stripHeadersFooters: true,
+            mergeBrokenLines: true
+          });
+          const reflowedJoined = sliceReflow.text.trim() || rawJoined;
+
           chapters.push({
             index: chapters.length,
             title:
               startPage === endPage
                 ? `第 ${startPage} 頁`
                 : `第 ${startPage} ~ ${endPage} 頁`,
-            content: joined,
-            wordCount: joined.replace(/\s+/g, '').length
+            content: reflowedJoined,
+            rawLineContent: rawJoined,
+            wordCount: reflowedJoined.replace(/\s+/g, '').length
           });
         }
 
@@ -1061,6 +1614,8 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
             description: chapters[0].content.slice(0, 180).replace(/\s+/g, ' '),
             encoding: 'PDF-UTF8',
             format: 'pdf',
+            pdfReflowed: true,
+            pdfReflowStats: fullReflow.stats,
             pdfPageCount: data.numpages || pages.length,
             rawPdfUrl: bookId ? `/api/books/${encodeURIComponent(bookId)}/raw` : null,
             totalChapters: chapters.length,
@@ -1070,11 +1625,20 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
         }
       }
 
+      // Single-chapter PDF with extractable text
+      const singleChapters = txtParsed.chapters.map((ch) => ({
+        ...ch,
+        rawLineContent: rawFullText
+      }));
+
       return {
         ...txtParsed,
+        chapters: singleChapters,
         title: infoTitle,
         author: infoAuthor,
         format: 'pdf',
+        pdfReflowed: true,
+        pdfReflowStats: fullReflow.stats,
         pdfPageCount: data.numpages || 1,
         rawPdfUrl: bookId ? `/api/books/${encodeURIComponent(bookId)}/raw` : null
       };
@@ -1096,7 +1660,7 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
           index: 0,
           title: `原版 PDF 檢視（共 ${data.numpages || 1} 頁）`,
           content:
-            '此 PDF 檔案為掃描圖片版或不含文字圖層，已為您載入下方原版 PDF 線上檢視器（亦可點擊上方「📄 原版 PDF 檢視」全幅閱讀）。',
+            '此 PDF 檔案為掃描圖片版或不含文字圖層，已為您載入下方原版 PDF 線上檢視器（亦可點擊上方「📄 原版 PDF」全幅閱讀）。',
           wordCount: 0
         }
       ]
@@ -1131,5 +1695,7 @@ module.exports = {
   parseEpubBuffer,
   parseMobiBuffer,
   parsePdfBuffer,
+  reflowPdfText,
+  extractPdfBuiltin,
   getEpubAsset
 };
