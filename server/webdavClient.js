@@ -111,7 +111,7 @@ async function listWebdavNovels(config, subPath = '/', currentDepth = 0, maxDept
     }
 
     const ext = path.posix.extname(baseName).toLowerCase();
-    if (!['.txt', '.epub', '.pdf', '.mobi', '.azw3', '.azw'].includes(ext)) return;
+    if (!['.txt', '.epub', '.pdf', '.mobi', '.azw3', '.azw', '.cbz'].includes(ext)) return;
 
     const sizeText =
       $(el).find('getcontentlength, d\\:getcontentlength, D\\:getcontentlength').first().text().trim() || '0';

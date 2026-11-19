@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>雲端書閣 · NAS 私人小說線上閱讀平台</title>
-  <meta name="description" content="手機與電腦免下載線上觀看私人 NAS 上的 EPUB 與 TXT 小說檔案，內建自動簡體轉繁體、章節自動解析、書籤與跨裝置閱讀進度雲端同步。" />
+  <meta name="description" content="手機與電腦免下載線上觀看私人 NAS 上的 EPUB、TXT、PDF、MOBI 小說與 CBZ 漫畫檔案，內建自動簡體轉繁體、章節自動解析、書籤與跨裝置閱讀進度雲端同步。" />
   <meta name="theme-color" content="#F6F1E7" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -69,9 +69,9 @@
             type="button"
             id="upload-book-btn"
             class="btn"
-            title="上傳 .epub 或 .txt 檔案至 NAS 書庫"
+            title="上傳 .epub、.txt、.pdf、.mobi 或 .cbz 漫畫檔案至 NAS 書庫"
           >
-            <span>📤 上傳小說</span>
+            <span>📤 上傳書籍/漫畫</span>
           </button>
 
           <button
@@ -109,7 +109,8 @@
 
         <div class="filter-right">
           <select id="format-filter" class="select-control" aria-label="檔案格式篩選">
-            <option value="ALL">所有格式 (EPUB / TXT / PDF / MOBI)</option>
+            <option value="ALL">所有格式 (EPUB / TXT / PDF / MOBI / CBZ)</option>
+            <option value="cbz">僅顯示 CBZ (漫畫)</option>
             <option value="epub">僅顯示 EPUB</option>
             <option value="txt">僅顯示 TXT</option>
             <option value="pdf">僅顯示 PDF</option>
@@ -170,6 +171,16 @@
             title="切換「📐 PDF 智慧重排（自動合併斷行/去頁碼）」、「📝 PDF 原始斷行」或「📄 原版 PDF 檢視器」"
           >
             <span id="reader-pdf-mode-text">📐 PDF 重排</span>
+          </button>
+
+          <button
+            type="button"
+            id="reader-comic-mode-btn"
+            class="btn"
+            style="display: none;"
+            title="切換漫畫閱讀模式：條漫捲動 / 單頁翻頁 / 雙頁對開"
+          >
+            <span id="reader-comic-mode-text">📜 條漫</span>
           </button>
 
           <button
@@ -331,6 +342,36 @@
           <button type="button" class="segmented-btn active" data-pdf-reflow-opt="reflow" title="自動合併跨行斷句、移除重複頁眉與頁碼，支援直橫排與字級縮放">📐 智慧重排</button>
           <button type="button" class="segmented-btn" data-pdf-reflow-opt="raw" title="保留原始每行換行與頁碼標記">📝 原始斷行</button>
           <button type="button" class="segmented-btn" data-pdf-reflow-opt="native" id="pdf-native-opt-btn" title="開啟原版 PDF 頁面檢視器">📄 原版 PDF</button>
+        </div>
+      </div>
+
+      <div id="comic-settings-section" class="setting-row" style="display: none;">
+        <div class="setting-label">
+          <span>🖼️ 漫畫閱讀模式</span>
+          <span id="comic-mode-label" style="font-size: 0.75rem; color: var(--accent);">📜 條漫捲動</span>
+        </div>
+        <div class="segmented-group" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 0.65rem;">
+          <button type="button" class="segmented-btn active" data-comic-mode-opt="scroll" title="垂直連續捲動（適合條漫與長篇滑動）">📜 條漫捲動</button>
+          <button type="button" class="segmented-btn" data-comic-mode-opt="single" title="一頁一頁翻看（點側邊或方向鍵翻頁）">📖 單頁翻頁</button>
+          <button type="button" class="segmented-btn" data-comic-mode-opt="double" title="寬螢幕雙頁對開（日漫右至左或左至右）">📖📖 雙頁對開</button>
+        </div>
+
+        <div class="setting-label">
+          <span>翻頁與對開方向</span>
+          <span id="comic-dir-label" style="font-size: 0.75rem; color: var(--accent);">日漫 (右 → 左)</span>
+        </div>
+        <div class="segmented-group" style="grid-template-columns: repeat(2, 1fr); margin-bottom: 0.65rem;">
+          <button type="button" class="segmented-btn active" data-comic-dir-opt="rtl" title="傳統日漫順序：點左側下一頁、雙頁右頁在先">⬅️ 日漫 (右→左)</button>
+          <button type="button" class="segmented-btn" data-comic-dir-opt="ltr" title="韓漫 / 美漫 / 條漫：點右側下一頁、雙頁左頁在先">➡️ 美漫 (左→右)</button>
+        </div>
+
+        <div class="setting-label">
+          <span>圖片縮放比例</span>
+        </div>
+        <div class="segmented-group" style="grid-template-columns: repeat(3, 1fr);">
+          <button type="button" class="segmented-btn active" data-comic-fit-opt="fit-width">適應寬度</button>
+          <button type="button" class="segmented-btn" data-comic-fit-opt="fit-contain">完整單頁</button>
+          <button type="button" class="segmented-btn" data-comic-fit-opt="original">原始寬度</button>
         </div>
       </div>
 
@@ -522,18 +563,18 @@
   </div>
 
   <!-- ====================================================================
-       MODAL: 上傳小說檔案 (.epub / .txt / .pdf / .mobi) 至 NAS 書庫
+       MODAL: 上傳書籍與漫畫 (.epub / .txt / .pdf / .mobi / .cbz) 至 NAS 書庫
        ==================================================================== -->
   <div id="upload-modal" class="modal-dialog" role="dialog" aria-labelledby="upload-modal-title">
     <div class="modal-header">
-      <h2 id="upload-modal-title">📤 新增書籍至書庫 (.epub / .txt / .pdf / .mobi)</h2>
+      <h2 id="upload-modal-title">📤 新增書籍 / 漫畫至書庫 (.epub / .txt / .pdf / .mobi / .cbz)</h2>
       <button type="button" id="close-upload-modal-btn" class="btn" style="padding: 0.25rem 0.6rem;">✕</button>
     </div>
 
     <form id="upload-book-form">
       <div class="form-group">
-        <label for="upload-file-input">選擇書籍檔案 (支援 .epub、.txt、.pdf、.mobi、.azw3，自動偵測簡體 UTF-8 / GBK / Big5 編碼)</label>
-        <input type="file" id="upload-file-input" class="form-input" accept=".epub,.txt,.pdf,.mobi,.azw3,.azw" required />
+        <label for="upload-file-input">選擇書籍或漫畫檔案 (支援 .epub、.txt、.pdf、.mobi、.azw3、.cbz，自動偵測簡體編碼與漫畫頁序)</label>
+        <input type="file" id="upload-file-input" class="form-input" accept=".epub,.txt,.pdf,.mobi,.azw3,.azw,.cbz" required />
       </div>
 
       <div class="form-group">

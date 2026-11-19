@@ -261,6 +261,9 @@
       convertMode: 's2twp',
       writingMode: 'horizontal', // 'horizontal' | 'vertical'
       pdfReflowMode: 'reflow',   // 'reflow' (智慧重排) | 'raw' (原始斷行) | 'native' (原版 PDF)
+      comicMode: 'scroll',       // 'scroll' (條漫捲動) | 'single' (單頁翻頁) | 'double' (雙頁對開)
+      comicDirection: 'rtl',     // 'rtl' (日漫右至左) | 'ltr' (左至右)
+      comicFit: 'fit-width',     // 'fit-width' | 'fit-contain' | 'original'
       clickFlip: 'both' // 'both' | 'left_next' | 'next_only' | 'off'
     },
 
@@ -268,6 +271,11 @@
     currentBook: null,      // { id, title, originalTitle, author, totalChapters, chapters: [...] }
     currentChapter: null,   // { index, title, originalTitle, content, rawLineContent, blocks, wordCount, prevIndex, nextIndex }
     pdfViewMode: 'reflow',  // 'reflow' | 'raw' | 'native'
+    comicCurrentPage: 0,
+    currentComicPages: [],
+    comicBlobUrls: [],
+    comicBlobChapterKey: null,
+    comicResolvedChapterUrls: new Map(),
     activeDrawerTab: 'toc',
     tocSearchQuery: '',
     isRestoringScroll: false,
@@ -1093,6 +1101,262 @@
     };
   }
 
+  const COMIC_IMAGE_EXT_REGEX_CLIENT = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+  const naturalComicCollatorClient = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+  function compareNaturalComicPathClient(a, b) {
+    const partsA = a.split('/');
+    const partsB = b.split('/');
+    const minLen = Math.min(partsA.length, partsB.length);
+    for (let i = 0; i < minLen; i++) {
+      if (partsA[i] !== partsB[i]) {
+        return naturalComicCollatorClient.compare(partsA[i], partsB[i]);
+      }
+    }
+    return partsA.length - partsB.length;
+  }
+
+  function isIgnoredComicEntryClient(entryName) {
+    if (!entryName) return true;
+    const normalized = entryName.replace(/\\/g, '/');
+    if (normalized.startsWith('__MACOSX/') || normalized.includes('/__MACOSX/')) return true;
+    const segments = normalized.split('/');
+    if (segments.some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..')) return true;
+    const base = segments[segments.length - 1].toLowerCase();
+    if (base === 'thumbs.db' || base === 'desktop.ini') return true;
+    return false;
+  }
+
+  function decodeXmlEntitiesClient(str) {
+    return String(str || '')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'");
+  }
+
+  function parseComicInfoXmlClient(xmlStr) {
+    if (!xmlStr) return {};
+    const extractTag = (tag) => {
+      const m = xmlStr.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+      return m ? decodeXmlEntitiesClient(m[1].trim()) : '';
+    };
+    const series = extractTag('Series');
+    const title = extractTag('Title');
+    const number = extractTag('Number');
+    const volume = extractTag('Volume');
+    const writer = extractTag('Writer') || extractTag('Author') || extractTag('Penciller');
+    const summary = extractTag('Summary');
+    const mangaRaw = extractTag('Manga').toLowerCase();
+
+    let fullTitle = title;
+    if (series && title && !title.includes(series)) {
+      fullTitle = `${series} - ${title}`;
+    } else if (series && !title) {
+      fullTitle = number ? `${series} 第${number}話` : volume ? `${series} 第${volume}卷` : series;
+    }
+
+    return {
+      title: fullTitle,
+      author: writer,
+      description: summary,
+      mangaRtl: mangaRaw === 'no' ? false : true
+    };
+  }
+
+  function getComicMimeTypeClient(entryPath) {
+    const clean = (entryPath || '').toLowerCase();
+    if (clean.endsWith('.png')) return 'image/png';
+    if (clean.endsWith('.webp')) return 'image/webp';
+    if (clean.endsWith('.gif')) return 'image/gif';
+    if (clean.endsWith('.bmp')) return 'image/bmp';
+    if (clean.endsWith('.avif')) return 'image/avif';
+    return 'image/jpeg';
+  }
+
+  async function parseCbzClient(arrayBuffer, filename) {
+    if (!window.JSZip) throw new Error('JSZip 尚未載入');
+    const rawTitle = filename.replace(/\.cbz$/i, '');
+    const uint8 = new Uint8Array(arrayBuffer);
+
+    // Check RAR (CBR) magic bytes
+    if (uint8.length >= 4 && uint8[0] === 0x52 && uint8[1] === 0x61 && uint8[2] === 0x72 && uint8[3] === 0x21) {
+      return {
+        title: rawTitle,
+        originalTitle: rawTitle,
+        author: '漫畫作品',
+        format: 'cbz',
+        isComic: true,
+        mangaRtl: true,
+        comicPageCount: 0,
+        totalChapters: 1,
+        totalWords: 0,
+        chapters: [
+          {
+            index: 0,
+            title: '格式提示',
+            originalTitle: '格式提示',
+            content:
+              '此檔案內部為 RAR 壓縮格式（CBR），目前僅支援標準 ZIP 壓縮的 CBZ 漫畫格式，建議使用壓縮軟體轉存為 .cbz (ZIP) 後重新讀取。',
+            blocks: [],
+            wordCount: 0,
+            pageCount: 0
+          }
+        ]
+      };
+    }
+
+    const zip = await window.JSZip.loadAsync(arrayBuffer);
+    let comicMeta = {};
+    const allFiles = Object.values(zip.files).filter((f) => !f.dir);
+    const comicInfoFile = allFiles.find((f) => /(?:^|\/)ComicInfo\.xml$/i.test(f.name.replace(/\\/g, '/')));
+    if (comicInfoFile) {
+      try {
+        const xmlText = await comicInfoFile.async('string');
+        comicMeta = parseComicInfoXmlClient(xmlText);
+      } catch (_) {}
+    }
+
+    const imageEntries = allFiles
+      .map((f) => ({ file: f, normPath: f.name.replace(/\\/g, '/') }))
+      .filter((item) => !isIgnoredComicEntryClient(item.normPath) && COMIC_IMAGE_EXT_REGEX_CLIENT.test(item.normPath))
+      .sort((a, b) => compareNaturalComicPathClient(a.normPath, b.normPath));
+
+    const title = comicMeta.title || rawTitle;
+    const author = comicMeta.author || '漫畫作品';
+
+    if (imageEntries.length === 0) {
+      return {
+        title,
+        originalTitle: title,
+        author,
+        format: 'cbz',
+        isComic: true,
+        mangaRtl: comicMeta.mangaRtl !== undefined ? comicMeta.mangaRtl : true,
+        comicPageCount: 0,
+        totalChapters: 1,
+        totalWords: 0,
+        chapters: [
+          {
+            index: 0,
+            title: '空白漫畫檔',
+            originalTitle: '空白漫畫檔',
+            content: '此 CBZ 壓縮檔中未包含可顯示的圖片頁面（支援 JPG / PNG / WebP / GIF / AVIF）。',
+            blocks: [],
+            wordCount: 0,
+            pageCount: 0
+          }
+        ]
+      };
+    }
+
+    const folderGroups = new Map();
+    for (const item of imageEntries) {
+      const slashIdx = item.normPath.lastIndexOf('/');
+      const groupKey = slashIdx === -1 ? '' : item.normPath.slice(0, slashIdx);
+      if (!folderGroups.has(groupKey)) folderGroups.set(groupKey, []);
+      folderGroups.get(groupKey).push(item);
+    }
+
+    const makeBlock = (item, idxInCh, globalPage) => {
+      const parts = item.normPath.split('/');
+      const base = parts[parts.length - 1];
+      return {
+        type: 'image',
+        zipEntryPath: item.file.name,
+        entryPath: item.normPath,
+        alt: `第 ${globalPage} 頁 (${base})`,
+        pageNumber: idxInCh + 1,
+        globalPageNumber: globalPage
+      };
+    };
+
+    const chapters = [];
+    let globalPage = 1;
+    const PAGES_PER_CHUNK = 25;
+
+    if (folderGroups.size > 1) {
+      const sortedGroups = Array.from(folderGroups.entries()).sort((a, b) =>
+        compareNaturalComicPathClient(a[0], b[0])
+      );
+      for (const [folderName, list] of sortedGroups) {
+        const displayLabel = folderName ? folderName.split('/').slice(-1)[0] : '封面 / 序頁';
+        if (list.length <= 45) {
+          const blocks = list.map((it, idx) => makeBlock(it, idx, globalPage++));
+          const t = `${displayLabel} (${list.length} 頁)`;
+          chapters.push({
+            index: chapters.length,
+            title: t,
+            originalTitle: t,
+            content: `${displayLabel}，共 ${list.length} 頁漫畫圖片`,
+            blocks,
+            wordCount: list.length,
+            pageCount: list.length
+          });
+        } else {
+          for (let i = 0; i < list.length; i += PAGES_PER_CHUNK) {
+            const slice = list.slice(i, i + PAGES_PER_CHUNK);
+            const blocks = slice.map((it, idx) => makeBlock(it, idx, globalPage++));
+            const t = `${displayLabel} (P.${i + 1}~${i + slice.length})`;
+            chapters.push({
+              index: chapters.length,
+              title: t,
+              originalTitle: t,
+              content: `${displayLabel} 第 ${i + 1}~${i + slice.length} 頁`,
+              blocks,
+              wordCount: slice.length,
+              pageCount: slice.length
+            });
+          }
+        }
+      }
+    } else if (imageEntries.length <= 30) {
+      const blocks = imageEntries.map((it, idx) => makeBlock(it, idx, globalPage++));
+      const t = `全一話 (共 ${imageEntries.length} 頁)`;
+      chapters.push({
+        index: 0,
+        title: t,
+        originalTitle: t,
+        content: `共 ${imageEntries.length} 頁漫畫圖片`,
+        blocks,
+        wordCount: imageEntries.length,
+        pageCount: imageEntries.length
+      });
+    } else {
+      for (let i = 0; i < imageEntries.length; i += PAGES_PER_CHUNK) {
+        const slice = imageEntries.slice(i, i + PAGES_PER_CHUNK);
+        const startP = i + 1;
+        const endP = i + slice.length;
+        const blocks = slice.map((it, idx) => makeBlock(it, idx, globalPage++));
+        const t = `第 ${startP} ~ ${endP} 頁`;
+        chapters.push({
+          index: chapters.length,
+          title: t,
+          originalTitle: t,
+          content: `第 ${startP} ~ ${endP} 頁漫畫圖片`,
+          blocks,
+          wordCount: slice.length,
+          pageCount: slice.length
+        });
+      }
+    }
+
+    return {
+      title,
+      originalTitle: title,
+      author,
+      format: 'cbz',
+      isComic: true,
+      cbzZip: zip,
+      mangaRtl: comicMeta.mangaRtl !== undefined ? comicMeta.mangaRtl : true,
+      comicPageCount: imageEntries.length,
+      totalChapters: chapters.length,
+      totalWords: imageEntries.length,
+      chapters
+    };
+  }
+
   // ==========================================================================
   // 4B. Direct Browser WebDAV Client (For Pure Static GitHub Pages Mode)
   // ==========================================================================
@@ -1202,17 +1466,19 @@
         return;
       }
 
-      if (!/\.(txt|epub|pdf|mobi|azw3|azw)$/i.test(baseName)) return;
+      if (!/\.(txt|epub|pdf|mobi|azw3|azw|cbz)$/i.test(baseName)) return;
 
       const lowerName = baseName.toLowerCase();
       const ext = lowerName.endsWith('.epub')
         ? 'epub'
+        : lowerName.endsWith('.cbz')
+        ? 'cbz'
         : lowerName.endsWith('.pdf')
         ? 'pdf'
         : lowerName.endsWith('.mobi') || lowerName.endsWith('.azw3') || lowerName.endsWith('.azw')
         ? 'mobi'
         : 'txt';
-      const rawTitle = baseName.replace(/\.(txt|epub|pdf|mobi|azw3|azw)$/i, '');
+      const rawTitle = baseName.replace(/\.(txt|epub|pdf|mobi|azw3|azw|cbz)$/i, '');
       const sizeEl = el.querySelector('getcontentlength, *|getcontentlength');
       const size = sizeEl ? parseInt(sizeEl.textContent.trim(), 10) || 0 : 0;
       const id = `webdav_direct_${btoa(unescape(encodeURIComponent(relFromRoot)))}`;
@@ -1737,6 +2003,36 @@
   // ==========================================================================
   // 8. Immersive Reader Engine (Streaming Chapters & Instant S2T Conversion)
   // ==========================================================================
+  function isComicBookActive() {
+    return Boolean(
+      state.currentBook && (state.currentBook.format === 'cbz' || state.currentBook.isComic)
+    );
+  }
+
+  function isComicPagedMode() {
+    return (
+      isComicBookActive() &&
+      Array.isArray(state.currentComicPages) &&
+      state.currentComicPages.length > 0 &&
+      (state.settings.comicMode === 'single' || state.settings.comicMode === 'double')
+    );
+  }
+
+  function revokeComicBlobUrls() {
+    if (Array.isArray(state.comicBlobUrls) && state.comicBlobUrls.length > 0) {
+      state.comicBlobUrls.forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch (_) {}
+      });
+      state.comicBlobUrls = [];
+    }
+    if (state.comicResolvedChapterUrls && typeof state.comicResolvedChapterUrls.clear === 'function') {
+      state.comicResolvedChapterUrls.clear();
+    }
+    state.comicBlobChapterKey = null;
+  }
+
   async function openBookReader(bookId, chapterIndex = 0, targetScrollPercent = 0) {
     document.getElementById('library-view').style.display = 'none';
     const readerView = document.getElementById('reader-view');
@@ -1767,6 +2063,8 @@
         let parsed;
         if (bookMeta.format === 'epub') {
           parsed = await parseEpubClient(arrayBuf, bookMeta.filename);
+        } else if (bookMeta.format === 'cbz') {
+          parsed = await parseCbzClient(arrayBuf, bookMeta.filename);
         } else if (bookMeta.format === 'mobi') {
           parsed = parseMobiClient(arrayBuf, bookMeta.filename);
         } else if (bookMeta.format === 'pdf') {
@@ -1791,7 +2089,8 @@
             index: c.index,
             title: convertStr(c.originalTitle || c.title),
             originalTitle: c.originalTitle || c.title,
-            wordCount: c.wordCount
+            wordCount: c.wordCount,
+            pageCount: c.pageCount || null
           }))
         };
       } else {
@@ -1809,7 +2108,7 @@
       } else {
         state.pdfViewMode = state.settings.pdfReflowMode === 'raw' ? 'raw' : 'reflow';
       }
-      updatePdfModeButtonUI();
+      applyReaderSettingsToDOM();
 
       document.getElementById('reader-book-title').textContent = convertStr(
         state.currentBook.originalTitle || state.currentBook.title
@@ -1896,6 +2195,418 @@
     await setPdfViewMode(nextMode);
   }
 
+  function updateComicModeUI() {
+    const isComic = isComicBookActive();
+    const mode = state.settings.comicMode || 'scroll';
+    const dir = state.settings.comicDirection || 'rtl';
+    const fit = state.settings.comicFit || 'fit-width';
+
+    const comicBtn = document.getElementById('reader-comic-mode-btn');
+    const comicTxt = document.getElementById('reader-comic-mode-text');
+    if (comicBtn && comicTxt) {
+      if (isComic) {
+        comicBtn.style.display = 'inline-flex';
+        comicBtn.classList.toggle('btn-pill-active', mode !== 'scroll');
+        comicTxt.textContent =
+          mode === 'double' ? '📖📖 雙頁' : mode === 'single' ? '📖 單頁' : '📜 條漫';
+      } else {
+        comicBtn.style.display = 'none';
+      }
+    }
+
+    const dirBtn = document.getElementById('reader-direction-toggle');
+    if (dirBtn) {
+      dirBtn.style.display = isComic ? 'none' : '';
+    }
+
+    const comicSection = document.getElementById('comic-settings-section');
+    if (comicSection) {
+      comicSection.style.display = isComic ? '' : 'none';
+    }
+
+    const modeLabel = document.getElementById('comic-mode-label');
+    if (modeLabel) {
+      modeLabel.textContent =
+        mode === 'double' ? '📖📖 雙頁對開' : mode === 'single' ? '📖 單頁翻頁' : '📜 條漫捲動';
+    }
+
+    const dirLabel = document.getElementById('comic-dir-label');
+    if (dirLabel) {
+      dirLabel.textContent = dir === 'rtl' ? '日漫 (右 → 左)' : '美漫 / 韓漫 (左 → 右)';
+    }
+
+    document.querySelectorAll('[data-comic-mode-opt]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.comicModeOpt === mode);
+    });
+    document.querySelectorAll('[data-comic-dir-opt]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.comicDirOpt === dir);
+    });
+    document.querySelectorAll('[data-comic-fit-opt]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.comicFitOpt === fit);
+    });
+
+    const canvasEl = document.getElementById('reader-canvas');
+    if (canvasEl) {
+      canvasEl.classList.toggle('comic-reader-canvas', isComic);
+      canvasEl.classList.toggle('comic-double-mode', isComic && mode === 'double');
+      if (isComic) {
+        canvasEl.classList.remove('vertical-mode');
+      }
+    }
+  }
+
+  function setComicMode(newMode) {
+    const normalized = ['scroll', 'single', 'double'].includes(newMode) ? newMode : 'scroll';
+    const prevPct = calculateCurrentScrollPercent();
+    state.settings.comicMode = normalized;
+    updateComicModeUI();
+    pushCloudSync();
+
+    if (
+      document.getElementById('reader-view').classList.contains('active') &&
+      isComicBookActive() &&
+      state.currentComicPages.length > 0
+    ) {
+      if (normalized === 'single' || normalized === 'double') {
+        const maxIdx = Math.max(0, state.currentComicPages.length - 1);
+        let idx = Math.min(maxIdx, Math.max(0, Math.round((prevPct / 100) * maxIdx)));
+        if (normalized === 'double') idx = idx - (idx % 2);
+        state.comicCurrentPage = idx;
+      }
+      renderComicStage();
+      if (normalized === 'scroll' && prevPct > 0) {
+        requestAnimationFrame(() => {
+          const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+          window.scrollTo({ top: Math.round((prevPct / 100) * maxScroll), behavior: 'instant' });
+        });
+      } else {
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      }
+      renderChapterHandwritingSVG();
+      updateScrollRibbon();
+      scheduleProgressSync();
+    }
+
+    const labels = {
+      scroll: '📜 已切換至「條漫連續捲動模式」',
+      single: '📖 已切換至「單頁翻頁模式」',
+      double: '📖📖 已切換至「雙頁對開模式」'
+    };
+    showToast(labels[normalized]);
+  }
+
+  function cycleComicViewMode() {
+    const order = ['scroll', 'single', 'double'];
+    const idx = order.indexOf(state.settings.comicMode || 'scroll');
+    setComicMode(order[(idx + 1) % order.length]);
+  }
+
+  function setComicDirection(dir) {
+    state.settings.comicDirection = dir === 'ltr' ? 'ltr' : 'rtl';
+    updateComicModeUI();
+    pushCloudSync();
+    if (
+      document.getElementById('reader-view').classList.contains('active') &&
+      isComicBookActive() &&
+      state.currentComicPages.length > 0
+    ) {
+      renderComicStage();
+      renderChapterHandwritingSVG();
+    }
+    showToast(
+      state.settings.comicDirection === 'rtl'
+        ? '⬅️ 已切換為「日漫閱讀方向（右 → 左）」'
+        : '➡️ 已切換為「美漫 / 韓漫方向（左 → 右）」'
+    );
+  }
+
+  function setComicFit(fit) {
+    state.settings.comicFit = ['fit-width', 'fit-contain', 'original'].includes(fit)
+      ? fit
+      : 'fit-width';
+    updateComicModeUI();
+    pushCloudSync();
+    if (
+      document.getElementById('reader-view').classList.contains('active') &&
+      isComicBookActive() &&
+      state.currentComicPages.length > 0
+    ) {
+      renderComicStage();
+      renderChapterHandwritingSVG();
+    }
+    const labels = {
+      'fit-width': '適應閱讀寬度',
+      'fit-contain': '完整顯示單頁（符合視窗高度）',
+      original: '原始解析度寬度'
+    };
+    showToast(`🔍 圖片縮放：${labels[state.settings.comicFit]}`);
+  }
+
+  function goToComicPage(newIdx) {
+    const pages = state.currentComicPages || [];
+    if (pages.length === 0) return;
+    let clamped = Math.max(0, Math.min(pages.length - 1, newIdx));
+    if (state.settings.comicMode === 'double') {
+      clamped = clamped - (clamped % 2);
+    }
+    state.comicCurrentPage = clamped;
+    renderComicStage();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    renderChapterHandwritingSVG();
+    updateScrollRibbon();
+    scheduleProgressSync();
+  }
+
+  function comicNextPage() {
+    const pages = state.currentComicPages || [];
+    if (pages.length === 0) return;
+    const step = state.settings.comicMode === 'double' ? 2 : 1;
+    if (state.comicCurrentPage + step < pages.length) {
+      goToComicPage(state.comicCurrentPage + step);
+    } else if (state.currentChapter && state.currentChapter.nextIndex !== null) {
+      loadAndRenderChapter(state.currentChapter.nextIndex, 0);
+      showToast(`已翻至下一話：${convertStr(state.currentChapter?.title || '')}`);
+    } else {
+      showToast('已是全書最後一頁');
+    }
+  }
+
+  function comicPrevPage() {
+    const pages = state.currentComicPages || [];
+    if (pages.length === 0) return;
+    const step = state.settings.comicMode === 'double' ? 2 : 1;
+    if (state.comicCurrentPage > 0) {
+      goToComicPage(Math.max(0, state.comicCurrentPage - step));
+    } else if (state.currentChapter && state.currentChapter.prevIndex !== null) {
+      loadAndRenderChapter(state.currentChapter.prevIndex, 100);
+      showToast(`已翻至上一話：${convertStr(state.currentChapter?.title || '')}`);
+    } else {
+      showToast('已是第一話第一頁');
+    }
+  }
+
+  let comicSvgSyncTimer = null;
+  function scheduleComicSvgRefresh() {
+    if (!state.currentBook || !state.currentChapter) return;
+    const bookAnnot = getBookAnnotations(state.currentBook.id);
+    const strokes = bookAnnot.strokes?.[state.currentChapter.index];
+    if (!strokes || strokes.length === 0) return;
+    if (comicSvgSyncTimer) clearTimeout(comicSvgSyncTimer);
+    comicSvgSyncTimer = setTimeout(() => {
+      renderChapterHandwritingSVG();
+    }, 120);
+  }
+
+  function preloadAdjacentComicPages(pages, currentIdx) {
+    const candidates = [currentIdx + 1, currentIdx + 2, currentIdx + 3, currentIdx - 1];
+    candidates.forEach((idx) => {
+      if (idx >= 0 && idx < pages.length && pages[idx].src && !pages[idx].src.startsWith('blob:')) {
+        const preImg = new Image();
+        preImg.src = pages[idx].src;
+      }
+    });
+  }
+
+  function renderComicStage() {
+    const bodyEl = document.getElementById('chapter-body');
+    if (!bodyEl) return;
+    bodyEl.innerHTML = '';
+
+    const pages = state.currentComicPages || [];
+    const mode = state.settings.comicMode || 'scroll';
+    const dir = state.settings.comicDirection || 'rtl';
+    const fit = state.settings.comicFit || 'fit-width';
+
+    // Top Interactive Comic Toolbar Banner
+    const banner = document.createElement('div');
+    banner.className = 'comic-toolbar-banner';
+
+    const fitNextMap = {
+      'fit-width': 'fit-contain',
+      'fit-contain': 'original',
+      original: 'fit-width'
+    };
+    const fitLabelMap = {
+      'fit-width': '📐 適寬',
+      'fit-contain': '🖼️ 整頁',
+      original: '🔍 原寸'
+    };
+
+    const pageSummary =
+      mode === 'scroll'
+        ? `共 ${pages.length} 頁`
+        : mode === 'double' && state.comicCurrentPage + 1 < pages.length
+        ? `第 ${state.comicCurrentPage + 1}-${state.comicCurrentPage + 2} / ${pages.length} 頁`
+        : `第 ${state.comicCurrentPage + 1} / ${pages.length} 頁`;
+
+    banner.innerHTML = `
+      <div class="comic-toolbar-group">
+        <button type="button" class="btn comic-btn-sm ${mode === 'scroll' ? 'btn-pill-active' : ''}" data-banner-comic-mode="scroll">📜 條漫</button>
+        <button type="button" class="btn comic-btn-sm ${mode === 'single' ? 'btn-pill-active' : ''}" data-banner-comic-mode="single">📖 單頁</button>
+        <button type="button" class="btn comic-btn-sm ${mode === 'double' ? 'btn-pill-active' : ''}" data-banner-comic-mode="double">📖📖 雙頁</button>
+      </div>
+      <div class="comic-toolbar-group">
+        <button type="button" class="btn comic-btn-sm" id="comic-banner-dir-btn" title="切換日漫(右→左)或韓/美漫(左→右)翻頁順序">
+          ${dir === 'rtl' ? '⬅️ 日漫 右→左' : '➡️ 美漫 左→右'}
+        </button>
+        <button type="button" class="btn comic-btn-sm" id="comic-banner-fit-btn" title="切換圖片縮放方式">
+          ${fitLabelMap[fit] || '📐 適寬'}
+        </button>
+        <span class="comic-toolbar-info" style="font-family: var(--font-mono); margin-left: 0.25rem;">${pageSummary}</span>
+      </div>
+    `;
+
+    banner.querySelectorAll('[data-banner-comic-mode]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setComicMode(btn.dataset.bannerComicMode);
+      });
+    });
+    banner.querySelector('#comic-banner-dir-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setComicDirection(dir === 'rtl' ? 'ltr' : 'rtl');
+    });
+    banner.querySelector('#comic-banner-fit-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setComicFit(fitNextMap[fit] || 'fit-width');
+    });
+
+    bodyEl.appendChild(banner);
+
+    const buildPageEl = (pageObj, eager = false) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'comic-page-wrapper';
+      wrap.dataset.pageIndex = pageObj.pageNumber - 1;
+
+      const img = document.createElement('img');
+      img.className = 'comic-page-img';
+      img.src = pageObj.src;
+      img.alt = pageObj.alt || `第 ${pageObj.pageNumber} 頁`;
+      img.loading = eager ? 'eager' : 'lazy';
+      img.decoding = 'async';
+      img.draggable = false;
+      img.addEventListener('load', scheduleComicSvgRefresh);
+
+      const badge = document.createElement('span');
+      badge.className = 'comic-page-badge';
+      badge.textContent = `${pageObj.pageNumber} / ${pages.length}`;
+
+      wrap.appendChild(img);
+      wrap.appendChild(badge);
+      return wrap;
+    };
+
+    if (mode === 'scroll') {
+      const scrollContainer = document.createElement('div');
+      scrollContainer.className = `comic-scroll-container comic-fit-${fit}`;
+      pages.forEach((p, idx) => {
+        scrollContainer.appendChild(buildPageEl(p, idx < 3));
+      });
+      bodyEl.appendChild(scrollContainer);
+      return;
+    }
+
+    // Paged Single / Double Spread Stage
+    const stage = document.createElement('div');
+    stage.id = 'comic-paged-stage';
+    stage.className = `comic-paged-stage comic-fit-${fit}`;
+
+    const spreadPair = document.createElement('div');
+    const isDouble = mode === 'double';
+    spreadPair.className = `comic-spread-pair${isDouble ? ' is-double' : ''}${
+      isDouble && dir === 'rtl' ? ' rtl-spread' : ''
+    }`;
+
+    const firstPage = pages[state.comicCurrentPage];
+    if (firstPage) {
+      spreadPair.appendChild(buildPageEl(firstPage, true));
+    }
+    if (isDouble && state.comicCurrentPage + 1 < pages.length) {
+      spreadPair.appendChild(buildPageEl(pages[state.comicCurrentPage + 1], true));
+    }
+    stage.appendChild(spreadPair);
+
+    // Preload neighboring pages
+    preloadAdjacentComicPages(pages, state.comicCurrentPage);
+
+    // Touch Swipe Gesture Support for mobile & tablet
+    let touchStartX = 0;
+    let touchStartY = 0;
+    stage.addEventListener(
+      'touchstart',
+      (e) => {
+        if (e.touches.length !== 1 || state.annotTool !== 'read') return;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+      },
+      { passive: true }
+    );
+    stage.addEventListener(
+      'touchend',
+      (e) => {
+        if (state.annotTool !== 'read' || fit === 'original') return;
+        if (!e.changedTouches || e.changedTouches.length !== 1) return;
+        const dx = e.changedTouches[0].clientX - touchStartX;
+        const dy = e.changedTouches[0].clientY - touchStartY;
+        if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+          if (dir === 'rtl') {
+            if (dx > 0) comicNextPage();
+            else comicPrevPage();
+          } else {
+            if (dx < 0) comicNextPage();
+            else comicPrevPage();
+          }
+        }
+      },
+      { passive: true }
+    );
+
+    // Bottom Pager Control Bar with Range Slider
+    const pagerBar = document.createElement('div');
+    pagerBar.className = 'comic-pager-bar';
+    pagerBar.innerHTML = `
+      <button type="button" class="btn comic-btn-sm" id="comic-prev-page-btn">上一頁</button>
+      <input type="range" class="comic-page-slider" id="comic-page-slider" min="0" max="${Math.max(
+        0,
+        pages.length - 1
+      )}" value="${state.comicCurrentPage}" aria-label="漫畫頁數滑桿" />
+      <span class="comic-pager-status">${pageSummary}</span>
+      <button type="button" class="btn btn-primary comic-btn-sm" id="comic-next-page-btn">下一頁</button>
+      <div class="comic-pager-hint">
+        ${
+          dir === 'rtl'
+            ? '日漫模式（右→左）：點擊左側畫面／按 ← 方向鍵 翻下一頁'
+            : '美漫模式（左→右）：點擊右側畫面／按 → 方向鍵 翻下一頁'
+        }
+      </div>
+    `;
+
+    pagerBar.querySelector('#comic-prev-page-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      comicPrevPage();
+    });
+    pagerBar.querySelector('#comic-next-page-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      comicNextPage();
+    });
+    const slider = pagerBar.querySelector('#comic-page-slider');
+    slider.addEventListener('click', (e) => e.stopPropagation());
+    slider.addEventListener('input', (e) => {
+      const idx = parseInt(e.target.value, 10) || 0;
+      const statusEl = pagerBar.querySelector('.comic-pager-status');
+      if (statusEl) {
+        statusEl.textContent = `第 ${idx + 1} / ${pages.length} 頁`;
+      }
+    });
+    slider.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.value, 10) || 0;
+      goToComicPage(idx);
+    });
+
+    stage.appendChild(pagerBar);
+    bodyEl.appendChild(stage);
+  }
+
   async function loadAndRenderChapter(chapterIndex, targetScrollPercent = 0) {
     if (!state.currentBook) return;
     const bookId = state.currentBook.id;
@@ -1923,6 +2634,7 @@
         title: convertStr(rawCh.originalTitle || rawCh.title),
         originalTitle: rawCh.originalTitle || rawCh.title,
         wordCount: rawCh.wordCount,
+        pageCount: rawCh.pageCount || null,
         content: convertStr(rawCh.content),
         rawLineContent: rawCh.rawLineContent ? convertStr(rawCh.rawLineContent) : null,
         blocks: rawCh.blocks
@@ -1936,6 +2648,7 @@
     }
 
     state.currentChapter = chapterData;
+    const isComic = isComicBookActive();
 
     // Render Chapter UI
     const displayBookTitle = convertStr(state.currentBook.originalTitle || state.currentBook.title);
@@ -1943,8 +2656,12 @@
 
     document.getElementById('reader-book-title').textContent = displayBookTitle;
     document.getElementById('reader-chapter-subtitle').textContent = displayChTitle;
-    document.getElementById('chapter-index-badge').textContent = `第 ${chapterData.index + 1} / ${state.currentBook.totalChapters} 章`;
-    document.getElementById('chapter-wordcount-badge').textContent = `${chapterData.wordCount.toLocaleString()} 字`;
+    document.getElementById('chapter-index-badge').textContent = isComic
+      ? `第 ${chapterData.index + 1} / ${state.currentBook.totalChapters} 話`
+      : `第 ${chapterData.index + 1} / ${state.currentBook.totalChapters} 章`;
+    document.getElementById('chapter-wordcount-badge').textContent = isComic
+      ? `${chapterData.pageCount || chapterData.wordCount || 0} 頁`
+      : `${chapterData.wordCount.toLocaleString()} 字`;
     document.getElementById('chapter-main-title').textContent = displayChTitle;
 
     const bodyEl = document.getElementById('chapter-body');
@@ -1952,6 +2669,84 @@
 
     const isPdf = state.currentBook.format === 'pdf';
     const pdfMode = state.pdfViewMode || 'reflow';
+
+    if (!isComic) {
+      revokeComicBlobUrls();
+      state.currentComicPages = [];
+    }
+
+    // 0. CBZ Comic Rendering
+    if (isComic) {
+      const memBook = state.inMemoryBooks.get(bookId);
+      const imageBlocks = (chapterData.blocks || []).filter((b) => b.type === 'image');
+
+      if (memBook && memBook.cbzZip && imageBlocks.length > 0) {
+        const targetKey = `${bookId}:${clampedIndex}`;
+        if (state.comicBlobChapterKey !== targetKey) {
+          revokeComicBlobUrls();
+          state.comicBlobChapterKey = targetKey;
+          const entriesToExtract = imageBlocks.filter((b) => b.zipEntryPath);
+          const BATCH_SIZE = 6;
+          for (let i = 0; i < entriesToExtract.length; i += BATCH_SIZE) {
+            const batch = entriesToExtract.slice(i, i + BATCH_SIZE);
+            await Promise.all(
+              batch.map(async (b) => {
+                if (state.comicResolvedChapterUrls.has(b.zipEntryPath)) return;
+                const zipFile = memBook.cbzZip.file(b.zipEntryPath);
+                if (!zipFile) return;
+                const bytes = await zipFile.async('uint8array');
+                const mime = getComicMimeTypeClient(b.entryPath || b.zipEntryPath);
+                const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+                state.comicBlobUrls.push(blobUrl);
+                state.comicResolvedChapterUrls.set(b.zipEntryPath, blobUrl);
+              })
+            );
+          }
+        }
+      }
+
+      const resolvedPages = imageBlocks
+        .map((b, idx) => {
+          const url = b.zipEntryPath
+            ? state.comicResolvedChapterUrls.get(b.zipEntryPath) || ''
+            : b.src && b.src.startsWith('/api/')
+            ? `${getApiBase()}${b.src}`
+            : b.src || '';
+          return {
+            src: url,
+            alt: b.alt || `第 ${idx + 1} 頁`,
+            pageNumber: idx + 1,
+            globalPageNumber: b.globalPageNumber || idx + 1
+          };
+        })
+        .filter((p) => Boolean(p.src));
+
+      state.currentComicPages = resolvedPages;
+      document.getElementById('chapter-wordcount-badge').textContent = `${resolvedPages.length} 頁`;
+
+      if (resolvedPages.length > 0) {
+        const maxIdx = Math.max(0, resolvedPages.length - 1);
+        let initPage =
+          targetScrollPercent > 0 ? Math.round((targetScrollPercent / 100) * maxIdx) : 0;
+        initPage = Math.max(0, Math.min(maxIdx, initPage));
+        if (state.settings.comicMode === 'double') {
+          initPage = initPage - (initPage % 2);
+        }
+        state.comicCurrentPage = initPage;
+        renderComicStage();
+      } else {
+        const notice = document.createElement('div');
+        notice.style.cssText =
+          'padding: 1.5rem; border-radius: 10px; background: var(--bg-subtle); border: 1px dashed var(--border-subtle); text-align: center; color: var(--text-secondary);';
+        const p = document.createElement('p');
+        p.style.textIndent = '0';
+        p.textContent = chapterData.content || '此 CBZ 漫畫章節目前沒有可顯示的圖片頁面。';
+        notice.appendChild(p);
+        bodyEl.appendChild(notice);
+      }
+    } else {
+      state.currentComicPages = [];
+    }
 
     // Render interactive PDF Reflow / Raw / Native switcher bar at top of PDF chapters
     if (isPdf) {
@@ -1999,7 +2794,9 @@
     }
 
     // 1. Native PDF Viewer Mode
-    if (isPdf && state.currentBook.rawPdfUrl && pdfMode === 'native') {
+    if (isComic) {
+      // Already rendered via renderComicStage()
+    } else if (isPdf && state.currentBook.rawPdfUrl && pdfMode === 'native') {
       const pdfSrc = state.currentBook.rawPdfUrl.startsWith('/api/')
         ? `${getApiBase()}${state.currentBook.rawPdfUrl}`
         : state.currentBook.rawPdfUrl;
@@ -2096,7 +2893,9 @@
     }
 
     // Apply saved text highlights & render handwriting SVG strokes for this chapter
-    applyChapterHighlightsToDOM();
+    if (!isComic) {
+      applyChapterHighlightsToDOM();
+    }
     renderChapterHandwritingSVG();
 
     // Update Prev / Next buttons
@@ -2111,7 +2910,9 @@
     // Restore target scroll position
     state.isRestoringScroll = true;
     requestAnimationFrame(() => {
-      if (isVerticalMode()) {
+      if (isComicPagedMode()) {
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      } else if (isVerticalMode()) {
         window.scrollTo({ top: 0, behavior: 'instant' });
         const { maxScroll } = getVerticalScrollInfo();
         const targetPx =
@@ -2143,6 +2944,12 @@
   function closeReaderView() {
     scheduleProgressSync();
     hideSelectionPopover();
+    revokeComicBlobUrls();
+    state.currentComicPages = [];
+    state.comicCurrentPage = 0;
+    state.currentBook = null;
+    state.currentChapter = null;
+    applyReaderSettingsToDOM();
     document.getElementById('reader-view').classList.remove('active');
     document.getElementById('reader-settings-popover').classList.remove('open');
     closeDrawer();
@@ -2151,7 +2958,7 @@
   }
 
   function isVerticalMode() {
-    return state.settings.writingMode === 'vertical';
+    return state.settings.writingMode === 'vertical' && !isComicBookActive();
   }
 
   function getVerticalScrollInfo() {
@@ -2176,6 +2983,12 @@
   }
 
   function calculateCurrentScrollPercent() {
+    if (isComicPagedMode()) {
+      const total = state.currentComicPages.length;
+      if (total <= 1) return 0;
+      const pct = Math.round((state.comicCurrentPage / (total - 1)) * 100);
+      return Math.max(0, Math.min(100, pct));
+    }
     if (isVerticalMode()) {
       const { scrolled, maxScroll } = getVerticalScrollInfo();
       if (maxScroll <= 0) return 0;
@@ -2597,6 +3410,7 @@
 
     const q = state.tocSearchQuery.trim();
     const matchToc = q ? compileBooleanQueryClient(q) : null;
+    const isComic = isComicBookActive();
     listEl.innerHTML = '';
 
     state.currentBook.chapters.forEach((ch) => {
@@ -2609,9 +3423,12 @@
         state.currentChapter && state.currentChapter.index === ch.index ? 'active' : ''
       }`;
       btn.dataset.chIndex = ch.index;
+      const countText = isComic
+        ? `${ch.pageCount || ch.wordCount || 0} 頁`
+        : `${ch.wordCount || 0} 字`;
       btn.innerHTML = `
         <span class="toc-item-title">${escapeHtml(displayTitle)}</span>
-        <span class="toc-item-words">${ch.wordCount || 0} 字</span>
+        <span class="toc-item-words">${countText}</span>
       `;
       btn.addEventListener('click', () => {
         closeDrawer();
@@ -2638,23 +3455,41 @@
     const bookId = state.currentBook.id;
     const scrollPercent = calculateCurrentScrollPercent();
 
-    // Grab a short text snippet near current viewport
+    // Grab a short text snippet (or comic page number) near current viewport
     let excerpt = state.currentChapter.content
       ? state.currentChapter.content.slice(0, 90).replace(/\s+/g, ' ')
       : state.currentChapter.title;
 
-    const paragraphs = document.querySelectorAll('#chapter-body p');
-    for (const p of paragraphs) {
-      const rect = p.getBoundingClientRect();
-      if (isVerticalMode()) {
-        if (rect.right >= window.innerWidth * 0.35 && rect.left <= window.innerWidth * 0.92) {
-          excerpt = p.textContent.trim().slice(0, 90);
-          break;
-        }
+    if (isComicBookActive() && state.currentComicPages.length > 0) {
+      const totalP = state.currentComicPages.length;
+      if (isComicPagedMode()) {
+        const curP = state.currentComicPages[state.comicCurrentPage];
+        excerpt = `第 ${state.comicCurrentPage + 1} / ${totalP} 頁${curP?.alt ? ` · ${curP.alt}` : ''}`;
       } else {
-        if (rect.top >= 40 && rect.top <= window.innerHeight * 0.6) {
-          excerpt = p.textContent.trim().slice(0, 90);
-          break;
+        const pageWraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
+        for (const wrap of pageWraps) {
+          const rect = wrap.getBoundingClientRect();
+          if (rect.bottom >= 80 && rect.top <= window.innerHeight * 0.6) {
+            const pNum = (parseInt(wrap.dataset.pageIndex, 10) || 0) + 1;
+            excerpt = `第 ${pNum} / ${totalP} 頁`;
+            break;
+          }
+        }
+      }
+    } else {
+      const paragraphs = document.querySelectorAll('#chapter-body p');
+      for (const p of paragraphs) {
+        const rect = p.getBoundingClientRect();
+        if (isVerticalMode()) {
+          if (rect.right >= window.innerWidth * 0.35 && rect.left <= window.innerWidth * 0.92) {
+            excerpt = p.textContent.trim().slice(0, 90);
+            break;
+          }
+        } else {
+          if (rect.top >= 40 && rect.top <= window.innerHeight * 0.6) {
+            excerpt = p.textContent.trim().slice(0, 90);
+            break;
+          }
         }
       }
     }
@@ -2754,11 +3589,12 @@
     };
     root.style.setProperty('--reader-font-family', fontMap[s.fontFamily] || fontMap.serif);
 
-    // Apply Vertical / Horizontal writing mode
+    // Apply Vertical / Horizontal writing mode (disabled for comic image mode)
+    const isComic = isComicBookActive();
     const writingMode = s.writingMode === 'vertical' ? 'vertical' : 'horizontal';
     const canvasEl = document.getElementById('reader-canvas');
     if (canvasEl) {
-      canvasEl.classList.toggle('vertical-mode', writingMode === 'vertical');
+      canvasEl.classList.toggle('vertical-mode', !isComic && writingMode === 'vertical');
     }
 
     document.querySelectorAll('[data-dir-opt]').forEach((btn) => {
@@ -2783,7 +3619,10 @@
     const prevChBtn = document.getElementById('prev-chapter-btn');
     const nextChBtn = document.getElementById('next-chapter-btn');
     if (prevChBtn && nextChBtn) {
-      if (writingMode === 'vertical') {
+      if (isComic) {
+        prevChBtn.textContent = '← 上一話';
+        nextChBtn.textContent = '下一話 →';
+      } else if (writingMode === 'vertical') {
         nextChBtn.textContent = '← 下一章';
         prevChBtn.textContent = '上一章 →';
       } else {
@@ -2838,6 +3677,7 @@
     if (fsVal) fsVal.textContent = `${s.fontSize} px`;
 
     updatePdfModeButtonUI();
+    updateComicModeUI();
     updateGlobalConvertButtonUI();
   }
 
@@ -3023,6 +3863,14 @@
       });
     }
 
+    // CBZ Comic Reading Mode Toggle
+    const comicModeBtn = document.getElementById('reader-comic-mode-btn');
+    if (comicModeBtn) {
+      comicModeBtn.addEventListener('click', () => {
+        cycleComicViewMode();
+      });
+    }
+
     // Manual Cloud Sync Button
     document.getElementById('sync-now-btn').addEventListener('click', () => pullCloudSync(false));
     document.getElementById('refresh-sync-btn').addEventListener('click', () => pullCloudSync(false));
@@ -3047,15 +3895,52 @@
       if (!document.getElementById('reader-view').classList.contains('active')) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
+      if (isComicPagedMode()) {
+        const comicDir = state.settings.comicDirection || 'rtl';
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          if (comicDir === 'rtl') comicNextPage();
+          else comicPrevPage();
+          return;
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          if (comicDir === 'rtl') comicPrevPage();
+          else comicNextPage();
+          return;
+        } else if (e.key === 'PageDown' || e.key === ' ') {
+          e.preventDefault();
+          comicNextPage();
+          return;
+        } else if (e.key === 'PageUp') {
+          e.preventDefault();
+          comicPrevPage();
+          return;
+        }
+      }
+
       if (e.key === 'ArrowLeft') {
-        if (isVerticalMode()) {
+        if (isComicBookActive()) {
+          const comicDir = state.settings.comicDirection || 'rtl';
+          const targetIdx =
+            comicDir === 'rtl' ? state.currentChapter?.nextIndex : state.currentChapter?.prevIndex;
+          if (targetIdx !== null && targetIdx !== undefined) {
+            loadAndRenderChapter(targetIdx, 0);
+          }
+        } else if (isVerticalMode()) {
           e.preventDefault();
           flipToNextPageOrChapter();
         } else if (state.currentChapter?.prevIndex !== null) {
           loadAndRenderChapter(state.currentChapter.prevIndex, 0);
         }
       } else if (e.key === 'ArrowRight') {
-        if (isVerticalMode()) {
+        if (isComicBookActive()) {
+          const comicDir = state.settings.comicDirection || 'rtl';
+          const targetIdx =
+            comicDir === 'rtl' ? state.currentChapter?.prevIndex : state.currentChapter?.nextIndex;
+          if (targetIdx !== null && targetIdx !== undefined) {
+            loadAndRenderChapter(targetIdx, 0);
+          }
+        } else if (isVerticalMode()) {
           e.preventDefault();
           flipToPrevPageOrChapter();
         } else if (state.currentChapter?.nextIndex !== null) {
@@ -3177,8 +4062,14 @@
 
     // Tap reader canvas to flip page/chapter (or interact with highlights)
     document.getElementById('reader-canvas').addEventListener('click', (e) => {
-      // Ignore if user clicked a button, link, or annotation UI
-      if (e.target.closest('button, a, #annotation-toolbar, #text-selection-popover')) return;
+      // Ignore if user clicked a button, link, form control, comic toolbar/pager, or annotation UI
+      if (
+        e.target.closest(
+          'button, a, input, select, textarea, #annotation-toolbar, #text-selection-popover, .comic-toolbar-banner, .comic-pager-bar, .pdf-reflow-banner'
+        )
+      ) {
+        return;
+      }
 
       // Check if user clicked on an existing text highlight
       const markEl = e.target.closest('mark.reader-highlight');
@@ -3222,6 +4113,21 @@
       const winWidth = window.innerWidth || document.documentElement.clientWidth;
       const clickX = e.clientX;
       const ratio = clickX / winWidth;
+
+      if (isComicPagedMode()) {
+        if (flipMode === 'next_only') {
+          comicNextPage();
+          return;
+        }
+        const comicDir = state.settings.comicDirection || 'rtl';
+        const isNextZone = comicDir === 'rtl' ? ratio <= 0.6 : ratio >= 0.4;
+        if (isNextZone) {
+          comicNextPage();
+        } else {
+          comicPrevPage();
+        }
+        return;
+      }
 
       if (flipMode === 'next_only') {
         flipToNextPageOrChapter();
@@ -3628,6 +4534,24 @@
       });
     });
 
+    document.querySelectorAll('[data-comic-mode-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setComicMode(btn.dataset.comicModeOpt);
+      });
+    });
+
+    document.querySelectorAll('[data-comic-dir-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setComicDirection(btn.dataset.comicDirOpt);
+      });
+    });
+
+    document.querySelectorAll('[data-comic-fit-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setComicFit(btn.dataset.comicFitOpt);
+      });
+    });
+
     document.querySelectorAll('[data-flip-opt]').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.settings.clickFlip = btn.dataset.flipOpt;
@@ -3884,6 +4808,8 @@
           const lowerFileName = file.name.toLowerCase();
           const ext = lowerFileName.endsWith('.epub')
             ? 'epub'
+            : lowerFileName.endsWith('.cbz')
+            ? 'cbz'
             : lowerFileName.endsWith('.pdf')
             ? 'pdf'
             : lowerFileName.endsWith('.mobi') ||
@@ -3894,6 +4820,8 @@
           let parsed;
           if (ext === 'epub') {
             parsed = await parseEpubClient(arrayBuffer, file.name);
+          } else if (ext === 'cbz') {
+            parsed = await parseCbzClient(arrayBuffer, file.name);
           } else if (ext === 'pdf') {
             parsed = await parsePdfClient(arrayBuffer, file.name);
           } else if (ext === 'mobi') {
@@ -3914,6 +4842,10 @@
             folder,
             originalFolder: folder,
             format: ext,
+            isComic: Boolean(parsed.isComic),
+            cbzZip: parsed.cbzZip || null,
+            mangaRtl: parsed.mangaRtl !== undefined ? parsed.mangaRtl : true,
+            comicPageCount: parsed.comicPageCount || null,
             rawPdfUrl: parsed.rawPdfUrl || null,
             size: file.size,
             mtime: new Date().toISOString(),

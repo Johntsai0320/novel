@@ -667,21 +667,44 @@ function parseEpubBuffer(buffer, filename = '未命名小說.epub', bookId = '')
 }
 
 /**
- * Extract a binary asset from an EPUB buffer by its internal path
+ * Extract a binary asset from an EPUB or CBZ ZIP buffer by its internal path
  */
 function getEpubAsset(buffer, assetPath) {
   const zip = new AdmZip(buffer);
-  const normalized = assetPath.replace(/^\/+/, '');
-  const entry = zip.getEntry(normalized) || zip.getEntry(decodeURIComponent(normalized));
+  const cleanNormalized = String(assetPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^(\.\/)+/, '')
+    .replace(/^\/+/, '');
+  let decodedPath = cleanNormalized;
+  try {
+    decodedPath = decodeURIComponent(cleanNormalized)
+      .replace(/\\/g, '/')
+      .replace(/^(\.\/)+/, '')
+      .replace(/^\/+/, '');
+  } catch (_) {}
+
+  let entry = zip.getEntry(cleanNormalized) || zip.getEntry(decodedPath);
+  if (!entry) {
+    entry = zip.getEntries().find((e) => {
+      if (e.isDirectory) return false;
+      const eNorm = e.entryName
+        .replace(/\\/g, '/')
+        .replace(/^(\.\/)+/, '')
+        .replace(/^\/+/, '');
+      return eNorm === cleanNormalized || eNorm === decodedPath;
+    });
+  }
   if (!entry) return null;
 
-  const ext = path.extname(normalized).toLowerCase();
+  const ext = path.extname(decodedPath || cleanNormalized).toLowerCase();
   const mimeMap = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.png': 'image/png',
     '.gif': 'image/gif',
     '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.avif': 'image/avif',
     '.svg': 'image/svg+xml'
   };
 
@@ -1687,6 +1710,295 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
   }
 }
 
+const COMIC_IMAGE_EXT_REGEX = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const naturalComicCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function compareNaturalComicPath(a, b) {
+  const partsA = a.split('/');
+  const partsB = b.split('/');
+  const minLen = Math.min(partsA.length, partsB.length);
+  for (let i = 0; i < minLen; i++) {
+    if (partsA[i] !== partsB[i]) {
+      return naturalComicCollator.compare(partsA[i], partsB[i]);
+    }
+  }
+  return partsA.length - partsB.length;
+}
+
+function isIgnoredComicEntry(entryName) {
+  if (!entryName) return true;
+  const normalized = entryName.replace(/\\/g, '/');
+  if (normalized.startsWith('__MACOSX/') || normalized.includes('/__MACOSX/')) return true;
+  const segments = normalized.split('/');
+  if (segments.some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..')) return true;
+  const base = path.posix.basename(normalized).toLowerCase();
+  if (base === 'thumbs.db' || base === 'desktop.ini') return true;
+  return false;
+}
+
+function decodeXmlText(str) {
+  return String(str || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function parseComicInfoXml(xmlStr) {
+  if (!xmlStr) return {};
+  const extractTag = (tag) => {
+    const m = xmlStr.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+    return m ? decodeXmlText(m[1].trim()) : '';
+  };
+  const series = extractTag('Series');
+  const title = extractTag('Title');
+  const number = extractTag('Number');
+  const volume = extractTag('Volume');
+  const writer = extractTag('Writer') || extractTag('Author') || extractTag('Penciller');
+  const summary = extractTag('Summary');
+  const mangaRaw = extractTag('Manga').toLowerCase();
+
+  let fullTitle = title;
+  if (series && title && !title.includes(series)) {
+    fullTitle = `${series} - ${title}`;
+  } else if (series && !title) {
+    fullTitle = number ? `${series} 第${number}話` : volume ? `${series} 第${volume}卷` : series;
+  }
+
+  return {
+    title: fullTitle,
+    author: writer,
+    description: summary,
+    mangaRtl: mangaRaw === 'no' ? false : true
+  };
+}
+
+/**
+ * Parse a .cbz (Comic Book ZIP) buffer into comic metadata and page chapters.
+ * Supports natural alphanumeric image sorting, subfolder chapter grouping,
+ * ComicInfo.xml metadata, and on-demand image asset URLs.
+ */
+function parseCbzBuffer(buffer, filename = '未命名漫畫.cbz', bookId = '') {
+  const rawTitle = path.basename(filename, path.extname(filename));
+
+  // Check if file is actually a RAR archive renamed to .cbz (CBR magic header)
+  if (
+    buffer &&
+    buffer.length >= 4 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x61 &&
+    buffer[2] === 0x72 &&
+    buffer[3] === 0x21
+  ) {
+    return {
+      title: rawTitle,
+      author: '漫畫作品',
+      description: '偵測到此檔案實為 RAR (CBR) 格式重新命名為 .cbz，請轉存為標準 ZIP 格式 (.cbz) 後閱讀。',
+      encoding: 'CBR-UNSUPPORTED',
+      format: 'cbz',
+      isComic: true,
+      mangaRtl: true,
+      comicPageCount: 0,
+      totalChapters: 1,
+      totalWords: 0,
+      chapters: [
+        {
+          index: 0,
+          title: '格式提示',
+          content:
+            '此檔案內部為 RAR 壓縮格式（CBR），目前僅支援標準 ZIP 壓縮的 CBZ 漫畫格式，建議使用壓縮軟體轉存為 .cbz (ZIP) 後重新讀取。',
+          blocks: [],
+          wordCount: 0,
+          pageCount: 0
+        }
+      ]
+    };
+  }
+
+  try {
+    const zip = new AdmZip(buffer);
+    const entries = zip.getEntries();
+
+    let comicMeta = {};
+    const comicInfoEntry = entries.find(
+      (e) => !e.isDirectory && /(?:^|\/)ComicInfo\.xml$/i.test(e.entryName.replace(/\\/g, '/'))
+    );
+    if (comicInfoEntry) {
+      try {
+        comicMeta = parseComicInfoXml(comicInfoEntry.getData().toString('utf8'));
+      } catch (_) {}
+    }
+
+    const imageEntries = entries
+      .filter((e) => {
+        if (e.isDirectory) return false;
+        const cleanName = e.entryName.replace(/\\/g, '/');
+        if (isIgnoredComicEntry(cleanName)) return false;
+        return COMIC_IMAGE_EXT_REGEX.test(cleanName);
+      })
+      .map((e) => e.entryName.replace(/\\/g, '/'))
+      .sort(compareNaturalComicPath);
+
+    const title = comicMeta.title || rawTitle;
+    const author = comicMeta.author || '漫畫作品';
+
+    if (imageEntries.length === 0) {
+      return {
+        title,
+        author,
+        description: 'CBZ 漫畫壓縮檔內未偵測到支援的圖片檔案（JPG/PNG/WebP/GIF）。',
+        encoding: 'CBZ-IMAGE',
+        format: 'cbz',
+        isComic: true,
+        mangaRtl: comicMeta.mangaRtl !== undefined ? comicMeta.mangaRtl : true,
+        comicPageCount: 0,
+        totalChapters: 1,
+        totalWords: 0,
+        chapters: [
+          {
+            index: 0,
+            title: '空白漫畫檔',
+            content: '此 CBZ 壓縮檔中未包含可顯示的圖片頁面（支援 JPG / PNG / WebP / GIF / AVIF）。',
+            blocks: [],
+            wordCount: 0,
+            pageCount: 0
+          }
+        ]
+      };
+    }
+
+    const folderGroups = new Map();
+    for (const entryPath of imageEntries) {
+      const dir = path.posix.dirname(entryPath);
+      const groupKey = dir === '.' ? '' : dir;
+      if (!folderGroups.has(groupKey)) folderGroups.set(groupKey, []);
+      folderGroups.get(groupKey).push(entryPath);
+    }
+
+    const makeImageBlock = (entryPath, pageIndexInChapter, globalPageNum) => {
+      const encodedPath = entryPath
+        .split('/')
+        .map((seg) => encodeURIComponent(seg))
+        .join('/');
+      const src = bookId
+        ? `/api/books/${encodeURIComponent(bookId)}/asset/${encodedPath}`
+        : entryPath;
+      return {
+        type: 'image',
+        src,
+        entryPath,
+        alt: `第 ${globalPageNum} 頁 (${path.posix.basename(entryPath)})`,
+        pageNumber: pageIndexInChapter + 1,
+        globalPageNumber: globalPageNum
+      };
+    };
+
+    const chapters = [];
+    let globalPage = 1;
+    const PAGES_PER_CHUNK = 25;
+
+    if (folderGroups.size > 1) {
+      const sortedGroups = Array.from(folderGroups.entries()).sort((a, b) =>
+        compareNaturalComicPath(a[0], b[0])
+      );
+      for (const [folderName, list] of sortedGroups) {
+        const displayLabel = folderName ? folderName.split('/').slice(-1)[0] : '封面 / 序頁';
+        if (list.length <= 45) {
+          const blocks = list.map((ep, idx) => makeImageBlock(ep, idx, globalPage++));
+          chapters.push({
+            index: chapters.length,
+            title: `${displayLabel} (${list.length} 頁)`,
+            content: `${displayLabel}，共 ${list.length} 頁漫畫圖片`,
+            blocks,
+            wordCount: list.length,
+            pageCount: list.length
+          });
+        } else {
+          for (let i = 0; i < list.length; i += PAGES_PER_CHUNK) {
+            const slice = list.slice(i, i + PAGES_PER_CHUNK);
+            const blocks = slice.map((ep, idx) => makeImageBlock(ep, idx, globalPage++));
+            chapters.push({
+              index: chapters.length,
+              title: `${displayLabel} (P.${i + 1}~${i + slice.length})`,
+              content: `${displayLabel} 第 ${i + 1}~${i + slice.length} 頁`,
+              blocks,
+              wordCount: slice.length,
+              pageCount: slice.length
+            });
+          }
+        }
+      }
+    } else {
+      if (imageEntries.length <= 30) {
+        const blocks = imageEntries.map((ep, idx) => makeImageBlock(ep, idx, globalPage++));
+        chapters.push({
+          index: 0,
+          title: `全一話 (共 ${imageEntries.length} 頁)`,
+          content: `共 ${imageEntries.length} 頁漫畫圖片`,
+          blocks,
+          wordCount: imageEntries.length,
+          pageCount: imageEntries.length
+        });
+      } else {
+        for (let i = 0; i < imageEntries.length; i += PAGES_PER_CHUNK) {
+          const slice = imageEntries.slice(i, i + PAGES_PER_CHUNK);
+          const startP = i + 1;
+          const endP = i + slice.length;
+          const blocks = slice.map((ep, idx) => makeImageBlock(ep, idx, globalPage++));
+          chapters.push({
+            index: chapters.length,
+            title: `第 ${startP} ~ ${endP} 頁`,
+            content: `第 ${startP} ~ ${endP} 頁漫畫圖片`,
+            blocks,
+            wordCount: slice.length,
+            pageCount: slice.length
+          });
+        }
+      }
+    }
+
+    return {
+      title,
+      author,
+      description:
+        comicMeta.description ||
+        `CBZ 漫畫書（共 ${imageEntries.length} 頁，分為 ${chapters.length} 話/章節）`,
+      encoding: 'CBZ-IMAGE',
+      format: 'cbz',
+      isComic: true,
+      mangaRtl: comicMeta.mangaRtl !== undefined ? comicMeta.mangaRtl : true,
+      comicPageCount: imageEntries.length,
+      totalChapters: chapters.length,
+      totalWords: imageEntries.length,
+      chapters
+    };
+  } catch (err) {
+    return {
+      title: rawTitle,
+      author: '漫畫作品',
+      description: `CBZ 漫畫讀取失敗：${err.message}`,
+      encoding: 'CBZ-ERROR',
+      format: 'cbz',
+      isComic: true,
+      mangaRtl: true,
+      comicPageCount: 0,
+      totalChapters: 1,
+      totalWords: 0,
+      chapters: [
+        {
+          index: 0,
+          title: '讀取錯誤',
+          content: `無法解析此 CBZ 漫畫檔案（${err.message}），請確認檔案未損毀且為標準 ZIP 格式。`,
+          blocks: [],
+          wordCount: 0,
+          pageCount: 0
+        }
+      ]
+    };
+  }
+}
+
 module.exports = {
   convertText,
   compileBooleanQuery,
@@ -1695,7 +2007,9 @@ module.exports = {
   parseEpubBuffer,
   parseMobiBuffer,
   parsePdfBuffer,
+  parseCbzBuffer,
   reflowPdfText,
   extractPdfBuiltin,
-  getEpubAsset
+  getEpubAsset,
+  getZipAsset: getEpubAsset
 };

@@ -10,7 +10,9 @@ const {
   parseEpubBuffer,
   parseMobiBuffer,
   parsePdfBuffer,
-  getEpubAsset
+  parseCbzBuffer,
+  getEpubAsset,
+  getZipAsset
 } = require('./parsers');
 const {
   listWebdavNovels,
@@ -156,9 +158,9 @@ function decodeBookId(bookId) {
 }
 
 /**
- * Recursively scan local NAS mounted directory for .txt, .epub, .pdf, .mobi, .azw3 files
+ * Recursively scan local NAS mounted directory for .txt, .epub, .pdf, .mobi, .azw3, .cbz files
  */
-const SUPPORTED_EXTS = new Set(['.txt', '.epub', '.pdf', '.mobi', '.azw3', '.azw']);
+const SUPPORTED_EXTS = new Set(['.txt', '.epub', '.pdf', '.mobi', '.azw3', '.azw', '.cbz']);
 
 function scanLocalNovels(dir, baseDir = dir, results = []) {
   if (!fs.existsSync(dir)) return results;
@@ -248,6 +250,8 @@ async function getParsedBook(bookId, customWebdavHeader = null) {
   let parsed;
   if (ext === '.epub') {
     parsed = parseEpubBuffer(buffer, path.basename(relativePath), bookId);
+  } else if (ext === '.cbz') {
+    parsed = parseCbzBuffer(buffer, path.basename(relativePath), bookId);
   } else if (ext === '.pdf') {
     parsed = await parsePdfBuffer(buffer, path.basename(relativePath), bookId);
   } else if (ext === '.mobi' || ext === '.azw3' || ext === '.azw') {
@@ -257,8 +261,8 @@ async function getParsedBook(bookId, customWebdavHeader = null) {
   }
 
   setCache(parsedBookCache, mtimeKey, parsed);
-  if (ext === '.epub' || ext === '.pdf') {
-    setCache(rawBufferCache, mtimeKey, buffer, 6);
+  if (ext === '.epub' || ext === '.pdf' || ext === '.cbz') {
+    setCache(rawBufferCache, mtimeKey, buffer, 8);
   }
 
   return { parsed, buffer };
@@ -444,7 +448,8 @@ app.get('/api/books/:id/toc', async (req, res) => {
       index: ch.index,
       title: convertText(ch.title, convertMode),
       originalTitle: ch.title,
-      wordCount: ch.wordCount
+      wordCount: ch.wordCount,
+      pageCount: ch.pageCount || null
     }));
 
     res.json({
@@ -457,6 +462,9 @@ app.get('/api/books/:id/toc', async (req, res) => {
         description: convertText(parsed.description, convertMode),
         format: parsed.format,
         encoding: parsed.encoding,
+        isComic: Boolean(parsed.isComic),
+        comicPageCount: parsed.comicPageCount || null,
+        mangaRtl: parsed.mangaRtl !== undefined ? Boolean(parsed.mangaRtl) : true,
         rawPdfUrl: parsed.rawPdfUrl || null,
         pdfPageCount: parsed.pdfPageCount || null,
         pdfReflowed: Boolean(parsed.pdfReflowed),
@@ -484,6 +492,8 @@ app.get('/api/books/:id/raw', async (req, res) => {
         ? 'application/pdf'
         : ext === '.epub'
         ? 'application/epub+zip'
+        : ext === '.cbz'
+        ? 'application/vnd.comicbook+zip'
         : 'application/octet-stream';
 
     if (source === 'local') {
@@ -551,6 +561,7 @@ app.get('/api/books/:id/chapter/:index', async (req, res) => {
         title: convertText(chapter.title, convertMode),
         originalTitle: chapter.title,
         wordCount: chapter.wordCount,
+        pageCount: chapter.pageCount || null,
         content: convertedContent,
         rawLineContent: convertedRawLineContent,
         blocks: convertedBlocks,
@@ -564,7 +575,7 @@ app.get('/api/books/:id/chapter/:index', async (req, res) => {
 });
 
 /**
- * 5. Stream Embedded EPUB Image Assets On-Demand
+ * 5. Stream Embedded EPUB / CBZ Image Assets On-Demand
  */
 app.get('/api/books/:id/asset/*assetPath', async (req, res) => {
   try {
@@ -573,12 +584,23 @@ app.get('/api/books/:id/asset/*assetPath', async (req, res) => {
     const assetPath = Array.isArray(rawParam) ? rawParam.join('/') : rawParam || '';
     const headerWebdav = getRequestWebdavConfig(req);
 
-    const { buffer } = await getParsedBook(id, headerWebdav);
+    let { buffer } = await getParsedBook(id, headerWebdav);
+    if (!buffer) {
+      // Fallback: if rawBufferCache evicted buffer, re-read directly
+      const { source, relativePath } = decodeBookId(id);
+      if (source === 'local') {
+        const safeRel = path.normalize(relativePath).replace(/^(\.\.(\/|\\|$))+/, '');
+        const fullPath = path.join(NOVELS_DIR, safeRel);
+        if (fullPath.startsWith(NOVELS_DIR) && fs.existsSync(fullPath)) {
+          buffer = fs.readFileSync(fullPath);
+        }
+      }
+    }
     if (!buffer) {
       return res.status(404).end();
     }
 
-    const asset = getEpubAsset(buffer, assetPath);
+    const asset = (getZipAsset || getEpubAsset)(buffer, assetPath);
     if (!asset) {
       return res.status(404).end();
     }
@@ -592,7 +614,7 @@ app.get('/api/books/:id/asset/*assetPath', async (req, res) => {
 });
 
 /**
- * 6. Upload .txt, .epub, .pdf, or .mobi directly to NAS local library via Web UI
+ * 6. Upload .txt, .epub, .pdf, .mobi, or .cbz directly to NAS local library via Web UI
  */
 app.post('/api/books/upload', (req, res) => {
   try {
@@ -603,7 +625,7 @@ app.post('/api/books/upload', (req, res) => {
 
     const ext = path.extname(filename).toLowerCase();
     if (!SUPPORTED_EXTS.has(ext)) {
-      return res.status(400).json({ ok: false, error: '僅支援 .txt, .epub, .pdf, .mobi, .azw3 格式' });
+      return res.status(400).json({ ok: false, error: '僅支援 .txt, .epub, .pdf, .mobi, .azw3, .cbz 格式' });
     }
 
     const safeFolder = folder
