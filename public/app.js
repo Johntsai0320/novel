@@ -4874,6 +4874,23 @@
       }
     });
 
+    // Homepage Feature Overview Collapse/Expand Toggle
+    const introSection = document.getElementById('feature-intro-section');
+    const toggleIntroBtn = document.getElementById('toggle-feature-intro-btn');
+    if (introSection && toggleIntroBtn) {
+      const applyIntroCollapsedState = (collapsed) => {
+        introSection.classList.toggle('collapsed', collapsed);
+        toggleIntroBtn.setAttribute('aria-expanded', String(!collapsed));
+        toggleIntroBtn.textContent = collapsed ? '▼ 展開簡介' : '▲ 收合簡介';
+      };
+      applyIntroCollapsedState(localStorage.getItem(STORAGE_KEYS.INTRO_COLLAPSED) === '1');
+      toggleIntroBtn.addEventListener('click', () => {
+        const nextCollapsed = !introSection.classList.contains('collapsed');
+        localStorage.setItem(STORAGE_KEYS.INTRO_COLLAPSED, nextCollapsed ? '1' : '0');
+        applyIntroCollapsedState(nextCollapsed);
+      });
+    }
+
     // Sync before page unload or visibility hidden (mobile app switch)
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden' && state.currentBook) {

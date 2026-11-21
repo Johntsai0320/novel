@@ -330,6 +330,106 @@ button {
   padding: 1.5rem 1.5rem 4rem;
 }
 
+/* Feature Overview Card */
+.feature-intro-section {
+  margin-bottom: 1.5rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 1.1rem 1.35rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.feature-intro-section.collapsed {
+  padding: 0.78rem 1.25rem;
+}
+
+.feature-intro-section.collapsed .feature-intro-grid {
+  display: none;
+}
+
+.feature-intro-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.feature-intro-section:not(.collapsed) .feature-intro-header {
+  margin-bottom: 0.95rem;
+}
+
+.feature-intro-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.feature-intro-tagline {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.feature-intro-toggle-btn {
+  padding: 0.28rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.feature-intro-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(265px, 1fr));
+  gap: 0.75rem;
+}
+
+.feature-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.82rem 0.95rem;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.feature-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-1px);
+}
+
+.feature-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.35rem;
+}
+
+.feature-icon {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.feature-card-head h3 {
+  font-family: var(--font-serif);
+  font-size: 0.94rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.feature-card p {
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.feature-card code {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  padding: 0.06rem 0.32rem;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  color: var(--accent);
+}
+
 /* Continue Reading Hero Shelf */
 .continue-section {
   margin-bottom: 2rem;
