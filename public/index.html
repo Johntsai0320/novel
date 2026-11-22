@@ -57,6 +57,15 @@
 
           <button
             type="button"
+            id="global-eink-btn"
+            class="btn"
+            title="切換 BOOX / EinkBro 墨水屏無殘影最佳化模式（關閉動態模糊與滑動殘影、即時整頁跳轉）"
+          >
+            <span id="global-eink-label">⚡ 墨水屏：自動</span>
+          </button>
+
+          <button
+            type="button"
             id="sync-now-btn"
             class="btn"
             title="跨裝置雲端同步閱讀進度與書籤"
@@ -132,18 +141,18 @@
 
           <article class="feature-card">
             <div class="feature-card-head">
-              <span class="feature-icon" aria-hidden="true">🇹🇼</span>
-              <h3>簡繁轉換與直橫排</h3>
+              <span class="feature-icon" aria-hidden="true">⚡</span>
+              <h3>BOOX / EinkBro 與翻頁器調教</h3>
             </div>
-            <p>全站即時「簡→繁（台灣慣用語）/ 標準繁體 / 原文」轉換；閱讀器支援傳統直書（右起直排）與現代橫排、四款護眼與夜間主題、字體字級及點擊／鍵盤翻頁。</p>
+            <p>專為 BOOX Note Air6 C + EinkBro 調校無動畫零殘影切換、墨水高對比主題、簡繁轉換與直橫排；支援方向鍵／空白鍵與<strong>藍牙翻頁器自訂學習配對</strong>。</p>
           </article>
 
           <article class="feature-card">
             <div class="feature-card-head">
               <span class="feature-icon" aria-hidden="true">🖍️</span>
-              <h3>螢光筆與手寫筆記</h3>
+              <h3>螢光筆與電磁筆手寫筆記</h3>
             </div>
-            <p>選取段落文字即可標記四色螢光筆與撰寫筆記；開啟「畫線/手寫」工具列更可使用觸控筆或滑鼠自由手寫批註與橡皮擦清除，統一收錄於目錄「筆記」分頁。</p>
+            <p>選字即可標記彩墨螢光筆與文字批註；開啟「畫線/手寫」支援 BOOX 電磁筆手寫、筆尾橡皮擦與<strong>手指防誤觸</strong>（手指維持滑動不誤畫），統一收錄於「筆記」分頁。</p>
           </article>
 
           <article class="feature-card">
@@ -151,7 +160,7 @@
               <span class="feature-icon" aria-hidden="true">☁️</span>
               <h3>跨裝置同步與邏輯搜尋</h3>
             </div>
-            <p>設定同步識別碼即可跨手機、平板與電腦同步進度、書籤、筆記與排版設定（相容 NAS 與 WebDAV 掛載）；搜尋支援 <code>空白/&amp;</code>(且)、<code>|</code>(或)、<code>-</code>(排除) 與括號跨繁簡比對。</p>
+            <p>設定同步識別碼即可跨電子閱讀器、手機與電腦同步進度、書籤與筆記（相容 NAS 與 WebDAV）；搜尋支援 <code>空白/&amp;</code>(且)、<code>|</code>(或)、<code>-</code>(排除) 與括號跨繁簡比對。</p>
           </article>
         </div>
       </section>
@@ -250,6 +259,15 @@
             title="切換漫畫閱讀模式：條漫捲動 / 單頁翻頁 / 雙頁對開"
           >
             <span id="reader-comic-mode-text">📜 條漫</span>
+          </button>
+
+          <button
+            type="button"
+            id="reader-eink-btn"
+            class="btn"
+            title="切換 BOOX / EinkBro 墨水屏無殘影最佳化模式"
+          >
+            <span id="reader-eink-text">⚡ 墨水屏</span>
           </button>
 
           <button
@@ -377,6 +395,7 @@
           <button type="button" class="theme-swatch swatch-day" data-theme-opt="day">純白</button>
           <button type="button" class="theme-swatch swatch-sage" data-theme-opt="sage">護眼綠</button>
           <button type="button" class="theme-swatch swatch-night" data-theme-opt="night">夜間</button>
+          <button type="button" class="theme-swatch swatch-eink" data-theme-opt="eink" title="BOOX 墨水屏高對比純白黑字">墨水屏</button>
         </div>
       </div>
 
@@ -480,6 +499,17 @@
 
       <div class="setting-row">
         <div class="setting-label">
+          <span>版面閱讀寬度 (適合 10.3" Note Air6 C)</span>
+        </div>
+        <div class="segmented-group">
+          <button type="button" class="segmented-btn" data-width-opt="660">緊湊 660</button>
+          <button type="button" class="segmented-btn active" data-width-opt="760">標準 760</button>
+          <button type="button" class="segmented-btn" data-width-opt="960">寬幅 960</button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div class="setting-label">
           <span>點擊書頁翻頁模式</span>
           <span id="click-flip-label" style="font-size: 0.75rem; color: var(--accent);">點右翻頁/下一章</span>
         </div>
@@ -491,6 +521,49 @@
         </div>
         <div class="form-hint" style="margin-top: 0.35rem; font-size: 0.72rem;">
           本章未讀完時點擊翻一屏（下一頁），讀到底部/最左端自動翻入下一章！
+        </div>
+      </div>
+
+      <div id="eink-turner-settings-section" class="setting-row" style="padding-top: 0.75rem; border-top: 1px solid var(--border-subtle);">
+        <div class="setting-label">
+          <span>⚡ BOOX / EinkBro 墨水屏調教</span>
+          <span id="eink-mode-status-label" style="font-size: 0.74rem; color: var(--accent);">自動偵測</span>
+        </div>
+        <div class="segmented-group" style="margin-bottom: 0.65rem;">
+          <button type="button" class="segmented-btn active" data-eink-opt="auto" title="偵測到 EinkBro / BOOX 裝置時自動啟用無殘影與即時整頁翻頁">自動偵測</button>
+          <button type="button" class="segmented-btn" data-eink-opt="on" title="強制關閉平滑動畫、毛玻璃與陰影，採即時跳頁">強制開啟</button>
+          <button type="button" class="segmented-btn" data-eink-opt="off" title="停用電子紙最佳化">關閉</button>
+        </div>
+
+        <label style="display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.76rem; color: var(--text-primary); margin-bottom: 0.7rem; cursor: pointer;">
+          <input type="checkbox" id="eink-stylus-only-checkbox" style="margin-top: 0.2rem;" />
+          <span>✍️ <strong>BOOX 電磁筆防誤觸</strong>：手寫時僅限感壓筆繪圖，手指維持滑動捲頁（支援筆尾/側鍵橡皮擦）</span>
+        </label>
+
+        <div class="setting-label">
+          <span>🎮 藍牙翻頁器 / 鍵盤按鍵配置</span>
+          <span id="turner-mode-label" style="font-size: 0.74rem; color: var(--accent);">標準頁內翻頁</span>
+        </div>
+        <div class="segmented-group">
+          <button type="button" class="segmented-btn active" data-turner-opt="page" title="→ / ↓ / PageDown / 空白鍵 翻下一頁，章末自動接下一章">標準雙鍵</button>
+          <button type="button" class="segmented-btn" data-turner-opt="swapped" title="左手握持翻頁器或上下鍵相反時使用">反轉對調</button>
+          <button type="button" class="segmented-btn" data-turner-opt="chapter" title="左右方向鍵直接切換上一章 / 下一章">切換整章</button>
+        </div>
+
+        <div class="turner-learn-grid">
+          <button type="button" id="learn-turner-next-btn" class="btn turner-learn-btn" title="點擊後按下藍牙翻頁器的「下一頁」按鈕即可自動配對記憶">
+            🎯 配對下一頁鍵
+          </button>
+          <button type="button" id="learn-turner-prev-btn" class="btn turner-learn-btn" title="點擊後按下藍牙翻頁器的「上一頁」按鈕即可自動配對記憶">
+            🎯 配對上一頁鍵
+          </button>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.35rem;">
+          <span id="turner-keys-status" style="font-size: 0.72rem; color: var(--text-secondary);">自訂按鍵：尚未綁定</span>
+          <button type="button" id="reset-turner-keys-btn" class="btn" style="padding: 0.16rem 0.45rem; font-size: 0.7rem;">清除綁定</button>
+        </div>
+        <div class="form-hint" style="margin-top: 0.35rem; font-size: 0.71rem;">
+          💡 EinkBro 可開啟「音量鍵翻頁」，或配對任意藍牙翻頁器（支援 PgUp/PgDn/方向鍵/Enter/音量鍵/媒體鍵學習）。
         </div>
       </div>
     </aside>

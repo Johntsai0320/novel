@@ -117,6 +117,106 @@ body[data-theme="night"] {
   --reader-border: rgba(214, 210, 201, 0.1);
 }
 
+/* High-Contrast E-Ink Theme (BOOX Note Air6 C / Kaleido 3) */
+body[data-theme="eink"] {
+  --bg-primary: #FFFFFF;
+  --bg-elevated: #FFFFFF;
+  --bg-glass: #FFFFFF;
+  --bg-subtle: #EFEFEF;
+  --bg-hover: #E0E0E0;
+  --text-primary: #000000;
+  --text-secondary: #1F1F1F;
+  --text-muted: #454545;
+  --accent: #000000;
+  --accent-hover: #262626;
+  --accent-soft: #EAEAEA;
+  --accent-border: #000000;
+  --success: #0F5132;
+  --success-soft: #E6F4EA;
+  --border-subtle: rgba(0, 0, 0, 0.35);
+  --border-strong: rgba(0, 0, 0, 0.72);
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --reader-bg: #FFFFFF;
+  --reader-surface: #FFFFFF;
+  --reader-text: #000000;
+  --reader-muted: #2C2C2C;
+  --reader-border: rgba(0, 0, 0, 0.45);
+}
+
+/* Global E-Ink / EinkBro Zero-Ghosting Mode */
+body.eink-mode,
+body.eink-mode * {
+  transition: none !important;
+  animation: none !important;
+  scroll-behavior: auto !important;
+}
+
+body.eink-mode .top-header,
+body.eink-mode .reader-topbar,
+body.eink-mode .comic-page-badge {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--bg-elevated);
+}
+
+body.eink-mode .book-card,
+body.eink-mode .feature-card,
+body.eink-mode .continue-card,
+body.eink-mode .continue-section,
+body.eink-mode .feature-intro-section,
+body.eink-mode .settings-popover,
+body.eink-mode .drawer-panel,
+body.eink-mode .modal-dialog,
+body.eink-mode .annotation-toolbar,
+body.eink-mode .comic-toolbar-banner,
+body.eink-mode .comic-pager-bar,
+body.eink-mode .btn {
+  box-shadow: none !important;
+  border-color: var(--border-strong);
+}
+
+body.eink-mode .book-card:hover,
+body.eink-mode .feature-card:hover,
+body.eink-mode .continue-card:hover {
+  transform: none !important;
+}
+
+body.eink-mode .btn,
+body.eink-mode .segmented-btn,
+body.eink-mode .theme-swatch {
+  min-height: 38px;
+}
+
+body.eink-mode .chapter-content {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Kaleido 3 Color E-Ink highlight boost for clearer contrast */
+body.eink-mode mark.reader-highlight.hl-yellow {
+  background: rgba(255, 215, 0, 0.48);
+  border-bottom-width: 2.5px;
+}
+body.eink-mode mark.reader-highlight.hl-green {
+  background: rgba(34, 197, 94, 0.36);
+  border-bottom-width: 2.5px;
+}
+body.eink-mode mark.reader-highlight.hl-blue {
+  background: rgba(59, 130, 246, 0.34);
+  border-bottom-width: 2.5px;
+}
+body.eink-mode mark.reader-highlight.hl-pink {
+  background: rgba(236, 72, 153, 0.34);
+  border-bottom-width: 2.5px;
+}
+
+/* BOOX EMR Stylus palm-rejection: allow finger pan-y scrolling while stylus writes */
+.handwriting-svg.stylus-only-mode {
+  touch-action: pan-y !important;
+}
+
 /* Base Reset */
 *, *::before, *::after {
   box-sizing: border-box;
@@ -1027,15 +1127,15 @@ button {
 
 .theme-swatches {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0.5rem;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.38rem;
 }
 
 .theme-swatch {
-  padding: 0.5rem 0.3rem;
+  padding: 0.48rem 0.2rem;
   border-radius: var(--radius-md);
   border: 2px solid var(--border-subtle);
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 600;
   text-align: center;
   transition: all var(--transition-fast);
@@ -1050,6 +1150,28 @@ button {
 .swatch-day { background: #FAF9F6; color: #1C1B18; }
 .swatch-sage { background: #E6EFE8; color: #1E2A22; }
 .swatch-night { background: #181816; color: #D8D4CD; }
+.swatch-eink { background: #FFFFFF; color: #000000; border-color: #000000; }
+
+.turner-learn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.turner-learn-btn {
+  padding: 0.4rem 0.45rem;
+  font-size: 0.75rem;
+  white-space: normal;
+  line-height: 1.3;
+}
+
+.turner-learn-btn.listening {
+  background: var(--accent);
+  color: #FFF9F2;
+  border-color: var(--accent);
+  font-weight: 700;
+}
 
 .segmented-group {
   display: grid;

@@ -264,6 +264,11 @@
       comicMode: 'scroll',       // 'scroll' (條漫捲動) | 'single' (單頁翻頁) | 'double' (雙頁對開)
       comicDirection: 'rtl',     // 'rtl' (日漫右至左) | 'ltr' (左至右)
       comicFit: 'fit-width',     // 'fit-width' | 'fit-contain' | 'original'
+      einkMode: 'auto',          // 'auto' (偵測 EinkBro/BOOX) | 'on' | 'off'
+      einkStylusOnly: false,     // BOOX 電磁筆防誤觸：僅限 pen 指標畫線，手指保留捲動
+      pageTurnerMode: 'page',    // 'page' (標準頁內翻頁) | 'swapped' (反轉握持) | 'chapter' (整章切換)
+      pageTurnerNextKey: '',     // Learned custom key token "code|key|keyCode|label"
+      pageTurnerPrevKey: '',     // Learned custom key token "code|key|keyCode|label"
       clickFlip: 'both' // 'both' | 'left_next' | 'next_only' | 'off'
     },
 
@@ -283,8 +288,73 @@
     annotTool: 'read',      // 'read' | 'highlighter' | 'pen' | 'eraser'
     annotColor: 'yellow',   // 'yellow' | 'green' | 'blue' | 'pink'
     pendingSelectionText: '',
-    editingHighlightId: null
+    editingHighlightId: null,
+    learningTurnerTarget: null // null | 'next' | 'prev'
   };
+
+  function isEinkBrowserUA() {
+    return /EinkBro|Onyx|BOOX/i.test(navigator.userAgent || '');
+  }
+
+  function isEinkActive() {
+    const mode = state.settings.einkMode || 'auto';
+    if (mode === 'on') return true;
+    if (mode === 'off') return false;
+    return isEinkBrowserUA();
+  }
+
+  function getScrollBehavior() {
+    return isEinkActive() ? 'instant' : 'smooth';
+  }
+
+  function getPageFlipOverlapRatio() {
+    return isEinkActive() ? 0.92 : 0.85;
+  }
+
+  function formatTurnerKeyLabel(e) {
+    const key = e.key || '';
+    const code = e.code || '';
+    if (key === ' ' || code === 'Space') return '空白鍵';
+    if (key === 'ArrowRight') return '→ 右鍵';
+    if (key === 'ArrowLeft') return '← 左鍵';
+    if (key === 'ArrowDown') return '↓ 下鍵';
+    if (key === 'ArrowUp') return '↑ 上鍵';
+    if (key === 'PageDown' || code === 'PageDown') return 'PageDown';
+    if (key === 'PageUp' || code === 'PageUp') return 'PageUp';
+    if (key === 'AudioVolumeDown' || key === 'VolumeDown') return '音量-';
+    if (key === 'AudioVolumeUp' || key === 'VolumeUp') return '音量+';
+    if (key === 'MediaTrackNext') return '下一曲鍵';
+    if (key === 'MediaTrackPrevious') return '上一曲鍵';
+    if (key && key !== 'Unidentified') return key;
+    if (code) return code;
+    return `Key#${e.keyCode || e.which || 0}`;
+  }
+
+  function encodeTurnerKeyBinding(e) {
+    const code = e.code || '';
+    const key = e.key || '';
+    const keyCode = e.keyCode || e.which || 0;
+    const label = formatTurnerKeyLabel(e).replace(/\|/g, '/');
+    return `${code}|${key}|${keyCode}|${label}`;
+  }
+
+  function getTurnerBindingLabel(savedToken) {
+    if (!savedToken) return '未綁定';
+    const parts = String(savedToken).split('|');
+    return parts[3] || parts[1] || parts[0] || '已綁定';
+  }
+
+  function matchesTurnerBinding(e, savedToken) {
+    if (!savedToken) return false;
+    const [sCode = '', sKey = '', sKc = '0'] = String(savedToken).split('|');
+    if (sCode && e.code && sCode === e.code) return true;
+    if (sKey && sKey !== 'Unidentified' && e.key && e.key === sKey) return true;
+    const kc = e.keyCode || e.which || 0;
+    if (sKc && Number(sKc) > 0 && kc === Number(sKc) && (!sKey || sKey === 'Unidentified' || e.key === 'Unidentified')) {
+      return true;
+    }
+    return false;
+  }
 
   function loadLocalJson(key, fallback) {
     try {
@@ -2351,7 +2421,7 @@
     }
     state.comicCurrentPage = clamped;
     renderComicStage();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: getScrollBehavior() });
     renderChapterHandwritingSVG();
     updateScrollRibbon();
     scheduleProgressSync();
@@ -3038,9 +3108,12 @@
 
     const svgEl = document.getElementById('handwriting-svg');
     if (svgEl) {
-      svgEl.classList.remove('drawing-active', 'eraser-active');
+      svgEl.classList.remove('drawing-active', 'eraser-active', 'stylus-only-mode');
       if (tool === 'pen' || tool === 'highlighter') {
         svgEl.classList.add('drawing-active');
+        if (state.settings.einkStylusOnly) {
+          svgEl.classList.add('stylus-only-mode');
+        }
       } else if (tool === 'eraser') {
         svgEl.classList.add('eraser-active');
       }
@@ -3564,7 +3637,8 @@
     sepia: '暖調宣紙',
     day: '晨光純白',
     sage: '松石護眼',
-    night: '靜夜深墨'
+    night: '靜夜深墨',
+    eink: '墨水高對比'
   };
 
   const CONVERT_LABELS = {
@@ -3572,6 +3646,125 @@
     s2t: '簡→繁 (標準)',
     none: '顯示原文'
   };
+
+  function updateEinkAndTurnerUI() {
+    const s = state.settings;
+    const active = isEinkActive();
+    const mode = s.einkMode || 'auto';
+    const turnerMode = s.pageTurnerMode || 'page';
+
+    document.body.classList.toggle('eink-mode', active);
+
+    const globalBtn = document.getElementById('global-eink-btn');
+    const globalLabel = document.getElementById('global-eink-label');
+    if (globalBtn) globalBtn.classList.toggle('btn-pill-active', active);
+    if (globalLabel) {
+      globalLabel.textContent =
+        mode === 'on'
+          ? '⚡ 墨水屏：開啟'
+          : mode === 'off'
+          ? '⚡ 墨水屏：關閉'
+          : active
+          ? '⚡ 墨水屏：自動(ON)'
+          : '⚡ 墨水屏：自動';
+    }
+
+    const readerBtn = document.getElementById('reader-eink-btn');
+    const readerLabel = document.getElementById('reader-eink-text');
+    if (readerBtn) readerBtn.classList.toggle('btn-pill-active', active);
+    if (readerLabel) {
+      readerLabel.textContent = active ? '⚡ 墨水屏 ON' : '⚡ 墨水屏';
+    }
+
+    const einkStatusLabel = document.getElementById('eink-mode-status-label');
+    if (einkStatusLabel) {
+      einkStatusLabel.textContent =
+        mode === 'on'
+          ? '已強制開啟（無殘影）'
+          : mode === 'off'
+          ? '已停用'
+          : isEinkBrowserUA()
+          ? '已自動偵測 EinkBro / BOOX'
+          : '自動偵測 (一般瀏覽器)';
+    }
+
+    document.querySelectorAll('[data-eink-opt]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.einkOpt === mode);
+    });
+
+    const stylusCb = document.getElementById('eink-stylus-only-checkbox');
+    if (stylusCb) {
+      stylusCb.checked = Boolean(s.einkStylusOnly);
+    }
+    const svgEl = document.getElementById('handwriting-svg');
+    if (svgEl) {
+      svgEl.classList.toggle(
+        'stylus-only-mode',
+        Boolean(s.einkStylusOnly) && (state.annotTool === 'pen' || state.annotTool === 'highlighter')
+      );
+    }
+
+    document.querySelectorAll('[data-turner-opt]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.turnerOpt === turnerMode);
+    });
+
+    const turnerLabel = document.getElementById('turner-mode-label');
+    if (turnerLabel) {
+      turnerLabel.textContent =
+        turnerMode === 'swapped'
+          ? '反轉對調（左手握持）'
+          : turnerMode === 'chapter'
+          ? '左右鍵直接換章'
+          : '標準頁內翻頁';
+    }
+
+    const nextBtn = document.getElementById('learn-turner-next-btn');
+    const prevBtn = document.getElementById('learn-turner-prev-btn');
+    if (nextBtn) {
+      const listening = state.learningTurnerTarget === 'next';
+      nextBtn.classList.toggle('listening', listening);
+      nextBtn.textContent = listening
+        ? '請按翻頁器「下一頁」... (Esc取消)'
+        : `🎯 下一頁：${getTurnerBindingLabel(s.pageTurnerNextKey)}`;
+    }
+    if (prevBtn) {
+      const listening = state.learningTurnerTarget === 'prev';
+      prevBtn.classList.toggle('listening', listening);
+      prevBtn.textContent = listening
+        ? '請按翻頁器「上一頁」... (Esc取消)'
+        : `🎯 上一頁：${getTurnerBindingLabel(s.pageTurnerPrevKey)}`;
+    }
+
+    const statusEl = document.getElementById('turner-keys-status');
+    if (statusEl) {
+      if (s.pageTurnerNextKey || s.pageTurnerPrevKey) {
+        statusEl.textContent = `已綁定：下=[${getTurnerBindingLabel(s.pageTurnerNextKey)}] / 上=[${getTurnerBindingLabel(s.pageTurnerPrevKey)}]`;
+      } else {
+        statusEl.textContent = '自訂按鍵：尚未綁定（預設支援 PgUp/PgDn/方向鍵/空白/音量鍵）';
+      }
+    }
+  }
+
+  function setEinkMode(newMode) {
+    const normalized = ['auto', 'on', 'off'].includes(newMode) ? newMode : 'auto';
+    state.settings.einkMode = normalized;
+    applyReaderSettingsToDOM();
+    pushCloudSync();
+    const msgMap = {
+      auto: isEinkBrowserUA()
+        ? '⚡ 已偵測到 EinkBro / BOOX，自動套用墨水屏無殘影最佳化'
+        : '⚡ 已切換為「自動偵測墨水屏」模式',
+      on: '⚡ 已強制開啟「BOOX / EinkBro 墨水屏無殘影模式」（即時整頁跳轉）',
+      off: '已關閉墨水屏最佳化模式'
+    };
+    showToast(msgMap[normalized]);
+  }
+
+  function cycleEinkMode() {
+    const order = ['auto', 'on', 'off'];
+    const idx = order.indexOf(state.settings.einkMode || 'auto');
+    setEinkMode(order[(idx + 1) % order.length]);
+  }
 
   function applyReaderSettingsToDOM() {
     const s = state.settings;
@@ -3679,6 +3872,7 @@
     updatePdfModeButtonUI();
     updateComicModeUI();
     updateGlobalConvertButtonUI();
+    updateEinkAndTurnerUI();
   }
 
   function setWritingMode(newMode) {
@@ -3831,7 +4025,7 @@
     if (prevPageBtn) {
       prevPageBtn.addEventListener('click', () => {
         if (state.currentPage > 1) {
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          window.scrollTo({ top: 0, behavior: getScrollBehavior() });
           loadLibrary(state.currentPage - 1);
         }
       });
@@ -3839,7 +4033,7 @@
     if (nextPageBtn) {
       nextPageBtn.addEventListener('click', () => {
         if (state.currentPage < state.totalPages) {
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          window.scrollTo({ top: 0, behavior: getScrollBehavior() });
           loadLibrary(state.currentPage + 1);
         }
       });
@@ -3848,6 +4042,12 @@
     // Global & Reader Simplified-to-Traditional Toggle
     document.getElementById('global-convert-btn').addEventListener('click', cycleConvertMode);
     document.getElementById('reader-convert-toggle').addEventListener('click', cycleConvertMode);
+
+    // BOOX / EinkBro E-Ink Mode Toggles
+    const globalEinkBtn = document.getElementById('global-eink-btn');
+    if (globalEinkBtn) globalEinkBtn.addEventListener('click', cycleEinkMode);
+    const readerEinkBtn = document.getElementById('reader-eink-btn');
+    if (readerEinkBtn) readerEinkBtn.addEventListener('click', cycleEinkMode);
 
     // Reader Vertical / Horizontal Writing Mode Toggle
     const readerDirToggle = document.getElementById('reader-direction-toggle');
@@ -3890,65 +4090,138 @@
       }
     });
 
-    // Keyboard navigation in Reader View
-    window.addEventListener('keydown', (e) => {
-      if (!document.getElementById('reader-view').classList.contains('active')) return;
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
+    // Keyboard & Bluetooth Page-Turner Navigation in Reader View
+    const triggerTurnerAction = (dirAction) => {
       if (isComicPagedMode()) {
-        const comicDir = state.settings.comicDirection || 'rtl';
-        if (e.key === 'ArrowLeft') {
-          e.preventDefault();
-          if (comicDir === 'rtl') comicNextPage();
-          else comicPrevPage();
-          return;
-        } else if (e.key === 'ArrowRight') {
-          e.preventDefault();
-          if (comicDir === 'rtl') comicPrevPage();
-          else comicNextPage();
-          return;
-        } else if (e.key === 'PageDown' || e.key === ' ') {
-          e.preventDefault();
-          comicNextPage();
-          return;
-        } else if (e.key === 'PageUp') {
-          e.preventDefault();
-          comicPrevPage();
+        if (dirAction === 'next') comicNextPage();
+        else comicPrevPage();
+      } else if (dirAction === 'next') {
+        flipToNextPageOrChapter();
+      } else {
+        flipToPrevPageOrChapter();
+      }
+    };
+
+    window.addEventListener('keydown', (e) => {
+      // 1. Custom Bluetooth Page-Turner Key Learning Mode
+      if (state.learningTurnerTarget) {
+        if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') {
           return;
         }
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') {
+          state.learningTurnerTarget = null;
+          updateEinkAndTurnerUI();
+          showToast('已取消翻頁器按鍵配對');
+          return;
+        }
+        const token = encodeTurnerKeyBinding(e);
+        const label = getTurnerBindingLabel(token);
+        if (state.learningTurnerTarget === 'next') {
+          state.settings.pageTurnerNextKey = token;
+          showToast(`✅ 已配對「下一頁」按鍵：${label}`);
+        } else {
+          state.settings.pageTurnerPrevKey = token;
+          showToast(`✅ 已配對「上一頁」按鍵：${label}`);
+        }
+        state.learningTurnerTarget = null;
+        updateEinkAndTurnerUI();
+        pushCloudSync();
+        return;
       }
 
-      if (e.key === 'ArrowLeft') {
-        if (isComicBookActive()) {
-          const comicDir = state.settings.comicDirection || 'rtl';
-          const targetIdx =
-            comicDir === 'rtl' ? state.currentChapter?.nextIndex : state.currentChapter?.prevIndex;
-          if (targetIdx !== null && targetIdx !== undefined) {
-            loadAndRenderChapter(targetIdx, 0);
-          }
-        } else if (isVerticalMode()) {
-          e.preventDefault();
-          flipToNextPageOrChapter();
-        } else if (state.currentChapter?.prevIndex !== null) {
-          loadAndRenderChapter(state.currentChapter.prevIndex, 0);
-        }
-      } else if (e.key === 'ArrowRight') {
-        if (isComicBookActive()) {
-          const comicDir = state.settings.comicDirection || 'rtl';
-          const targetIdx =
-            comicDir === 'rtl' ? state.currentChapter?.prevIndex : state.currentChapter?.nextIndex;
-          if (targetIdx !== null && targetIdx !== undefined) {
-            loadAndRenderChapter(targetIdx, 0);
-          }
-        } else if (isVerticalMode()) {
-          e.preventDefault();
-          flipToPrevPageOrChapter();
-        } else if (state.currentChapter?.nextIndex !== null) {
-          loadAndRenderChapter(state.currentChapter.nextIndex, 0);
-        }
-      } else if (e.key === 'Escape') {
+      if (!document.getElementById('reader-view').classList.contains('active')) return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+      if (e.key === 'Escape') {
         closeDrawer();
         document.getElementById('reader-settings-popover').classList.remove('open');
+        return;
+      }
+
+      // 2. Check Custom Learned Bluetooth Page-Turner Bindings first
+      if (matchesTurnerBinding(e, state.settings.pageTurnerNextKey)) {
+        e.preventDefault();
+        triggerTurnerAction('next');
+        return;
+      }
+      if (matchesTurnerBinding(e, state.settings.pageTurnerPrevKey)) {
+        e.preventDefault();
+        triggerTurnerAction('prev');
+        return;
+      }
+
+      const turnerMode = state.settings.pageTurnerMode || 'page';
+      const swapped = turnerMode === 'swapped';
+      const kc = e.keyCode || e.which || 0;
+
+      // 3. Universal Page-Turner Keys (PageDown/Up, Space, Volume keys, Media keys, Up/Down arrows)
+      const isPgDown = e.key === 'PageDown' || e.code === 'PageDown' || kc === 34 || kc === 93;
+      const isPgUp = e.key === 'PageUp' || e.code === 'PageUp' || kc === 33 || kc === 92;
+      const isVolDown = e.key === 'AudioVolumeDown' || e.key === 'VolumeDown' || kc === 25 || e.key === 'MediaTrackNext';
+      const isVolUp = e.key === 'AudioVolumeUp' || e.key === 'VolumeUp' || kc === 24 || e.key === 'MediaTrackPrevious';
+
+      if (isPgDown || isVolDown || (e.key === ' ' && !e.shiftKey) || e.key === 'ArrowDown') {
+        e.preventDefault();
+        triggerTurnerAction(swapped ? 'prev' : 'next');
+        return;
+      }
+      if (isPgUp || isVolUp || (e.key === ' ' && e.shiftKey) || e.key === 'ArrowUp') {
+        e.preventDefault();
+        triggerTurnerAction(swapped ? 'next' : 'prev');
+        return;
+      }
+
+      // 4. Left / Right Arrow Keys (respect Comic RTL/LTR, Vertical Mode, & Turner Mode)
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (isComicPagedMode()) {
+          const comicDir = state.settings.comicDirection || 'rtl';
+          const naturalNext = comicDir === 'rtl' ? e.key === 'ArrowLeft' : e.key === 'ArrowRight';
+          const goNext = swapped ? !naturalNext : naturalNext;
+          if (goNext) comicNextPage();
+          else comicPrevPage();
+          return;
+        }
+
+        if (isComicBookActive()) {
+          const comicDir = state.settings.comicDirection || 'rtl';
+          const naturalNext = comicDir === 'rtl' ? e.key === 'ArrowLeft' : e.key === 'ArrowRight';
+          const goNext = swapped ? !naturalNext : naturalNext;
+          if (turnerMode === 'chapter') {
+            const targetIdx = goNext ? state.currentChapter?.nextIndex : state.currentChapter?.prevIndex;
+            if (targetIdx !== null && targetIdx !== undefined) loadAndRenderChapter(targetIdx, 0);
+          } else {
+            triggerTurnerAction(goNext ? 'next' : 'prev');
+          }
+          return;
+        }
+
+        if (isVerticalMode()) {
+          const naturalNext = e.key === 'ArrowLeft';
+          const goNext = swapped ? !naturalNext : naturalNext;
+          if (turnerMode === 'chapter') {
+            const targetIdx = goNext ? state.currentChapter?.nextIndex : state.currentChapter?.prevIndex;
+            if (targetIdx !== null && targetIdx !== undefined) loadAndRenderChapter(targetIdx, 0);
+          } else {
+            triggerTurnerAction(goNext ? 'next' : 'prev');
+          }
+          return;
+        }
+
+        // Horizontal TXT / EPUB / PDF
+        if (turnerMode === 'chapter') {
+          if (e.key === 'ArrowLeft' && state.currentChapter?.prevIndex !== null) {
+            loadAndRenderChapter(state.currentChapter.prevIndex, 0);
+          } else if (e.key === 'ArrowRight' && state.currentChapter?.nextIndex !== null) {
+            loadAndRenderChapter(state.currentChapter.nextIndex, 0);
+          }
+          return;
+        }
+
+        const goNext = swapped ? e.key === 'ArrowLeft' : e.key === 'ArrowRight';
+        triggerTurnerAction(goNext ? 'next' : 'prev');
       }
     });
 
@@ -3982,6 +4255,9 @@
 
     // Helper functions for page flipping (scroll within chapter, change chapter at boundary)
     function flipToNextPageOrChapter() {
+      const overlapRatio = getPageFlipOverlapRatio();
+      const scrollBehavior = getScrollBehavior();
+
       if (isVerticalMode()) {
         const { scrolled, maxScroll, viewportSize } = getVerticalScrollInfo();
         const remainingLeft = maxScroll - scrolled;
@@ -3993,8 +4269,8 @@
             showToast('已是全書最後一章');
           }
         } else {
-          const step = Math.max(160, Math.floor(viewportSize * 0.85));
-          scrollVerticalTo(Math.min(maxScroll, scrolled + step), 'smooth');
+          const step = Math.max(160, Math.floor(viewportSize * overlapRatio));
+          scrollVerticalTo(Math.min(maxScroll, scrolled + step), scrollBehavior);
         }
         return;
       }
@@ -4016,14 +4292,17 @@
           showToast('已是全書最後一章');
         }
       } else {
-        // Page down by 85% of screen height (leaving 15% overlap for reading continuity)
-        const step = Math.max(160, Math.floor(viewportHeight * 0.85));
+        // Page down by viewport ratio (larger step & instant jump on E-Ink to avoid ghosting)
+        const step = Math.max(160, Math.floor(viewportHeight * overlapRatio));
         const target = Math.min(maxScroll, scrollY + step);
-        window.scrollTo({ top: target, behavior: 'smooth' });
+        window.scrollTo({ top: target, behavior: scrollBehavior });
       }
     }
 
     function flipToPrevPageOrChapter() {
+      const overlapRatio = getPageFlipOverlapRatio();
+      const scrollBehavior = getScrollBehavior();
+
       if (isVerticalMode()) {
         const { scrolled, viewportSize } = getVerticalScrollInfo();
         if (scrolled <= 40) {
@@ -4034,8 +4313,8 @@
             showToast('已是第一章起點');
           }
         } else {
-          const step = Math.max(160, Math.floor(viewportSize * 0.85));
-          scrollVerticalTo(Math.max(0, scrolled - step), 'smooth');
+          const step = Math.max(160, Math.floor(viewportSize * overlapRatio));
+          scrollVerticalTo(Math.max(0, scrolled - step), scrollBehavior);
         }
         return;
       }
@@ -4053,10 +4332,10 @@
           showToast('已是第一章頂部');
         }
       } else {
-        // Page up by 85% of screen height
-        const step = Math.max(160, Math.floor(viewportHeight * 0.85));
+        // Page up by viewport ratio
+        const step = Math.max(160, Math.floor(viewportHeight * overlapRatio));
         const target = Math.max(0, scrollY - step);
-        window.scrollTo({ top: target, behavior: 'smooth' });
+        window.scrollTo({ top: target, behavior: scrollBehavior });
       }
     }
 
@@ -4618,6 +4897,78 @@
         pushCloudSync();
       });
     });
+
+    document.querySelectorAll('[data-eink-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setEinkMode(btn.dataset.einkOpt);
+      });
+    });
+
+    const stylusOnlyCb = document.getElementById('eink-stylus-only-checkbox');
+    if (stylusOnlyCb) {
+      stylusOnlyCb.addEventListener('change', (e) => {
+        state.settings.einkStylusOnly = Boolean(e.target.checked);
+        applyReaderSettingsToDOM();
+        pushCloudSync();
+        showToast(
+          state.settings.einkStylusOnly
+            ? '✍️ 已開啟「BOOX 電磁筆防誤觸」：手寫時僅感壓筆會畫線，手指維持滑動'
+            : '已關閉電磁筆防誤觸限制'
+        );
+      });
+    }
+
+    document.querySelectorAll('[data-turner-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.settings.pageTurnerMode = btn.dataset.turnerOpt;
+        applyReaderSettingsToDOM();
+        pushCloudSync();
+        const desc =
+          btn.dataset.turnerOpt === 'swapped'
+            ? '反轉對調（適合左手握持翻頁器）'
+            : btn.dataset.turnerOpt === 'chapter'
+            ? '左右鍵直接切換整章'
+            : '標準頁內翻頁（章末自動接下一章）';
+        showToast(`🎮 翻頁器模式：${desc}`);
+      });
+    });
+
+    const learnNextBtn = document.getElementById('learn-turner-next-btn');
+    if (learnNextBtn) {
+      learnNextBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.learningTurnerTarget = state.learningTurnerTarget === 'next' ? null : 'next';
+        updateEinkAndTurnerUI();
+        if (state.learningTurnerTarget) {
+          showToast('請立即按下藍牙翻頁器的「下一頁」按鈕進行配對...');
+        }
+      });
+    }
+
+    const learnPrevBtn = document.getElementById('learn-turner-prev-btn');
+    if (learnPrevBtn) {
+      learnPrevBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.learningTurnerTarget = state.learningTurnerTarget === 'prev' ? null : 'prev';
+        updateEinkAndTurnerUI();
+        if (state.learningTurnerTarget) {
+          showToast('請立即按下藍牙翻頁器的「上一頁」按鈕進行配對...');
+        }
+      });
+    }
+
+    const resetTurnerBtn = document.getElementById('reset-turner-keys-btn');
+    if (resetTurnerBtn) {
+      resetTurnerBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.learningTurnerTarget = null;
+        state.settings.pageTurnerNextKey = '';
+        state.settings.pageTurnerPrevKey = '';
+        updateEinkAndTurnerUI();
+        pushCloudSync();
+        showToast('已清除自訂翻頁器按鍵綁定，恢復預設鍵位');
+      });
+    }
 
     // NAS Connection & Sync Settings Modal
     document.getElementById('nas-settings-btn').addEventListener('click', openNasModal);
