@@ -204,6 +204,57 @@
         </div>
       </section>
 
+      <!-- Classification & Reading Status Filter Bar -->
+      <section id="classification-filter-bar" class="classification-filter-bar" aria-label="作品與閱讀狀態分類">
+        <div class="classification-row-split">
+          <div id="pub-status-tabs" class="status-pills-row" role="tablist" aria-label="作品狀態篩選">
+            <button type="button" class="status-pill active" data-pub-status="ALL" role="tab" aria-selected="true">全部狀態</button>
+            <button type="button" class="status-pill" data-pub-status="ongoing" role="tab" aria-selected="false">連載中</button>
+            <button type="button" class="status-pill" data-pub-status="completed" role="tab" aria-selected="false">已完結</button>
+            <button type="button" class="status-pill" data-pub-status="oneshot" role="tab" aria-selected="false">全一冊</button>
+            <button type="button" class="status-pill" data-pub-status="hiatus" role="tab" aria-selected="false">斷尾</button>
+          </div>
+          <button type="button" id="toggle-select-mode-btn" class="select-mode-trigger" title="切換批次選取模式">長按進入選取模式</button>
+        </div>
+
+        <div id="read-status-tabs" class="status-pills-row" role="tablist" aria-label="閱讀狀態篩選">
+          <button type="button" class="status-pill active" data-read-status="ALL" role="tab" aria-selected="true">全部閱讀</button>
+          <button type="button" class="status-pill" data-read-status="unread" role="tab" aria-selected="false">未讀</button>
+          <button type="button" class="status-pill" data-read-status="reading" role="tab" aria-selected="false">正在讀</button>
+          <button type="button" class="status-pill" data-read-status="finished" role="tab" aria-selected="false">已讀完</button>
+          <button type="button" class="status-pill" data-read-status="dropped" role="tab" aria-selected="false">棄追</button>
+        </div>
+
+        <!-- Batch Status Bar -->
+        <div id="batch-status-bar" class="batch-status-bar" style="display: none;" aria-label="批次狀態標記工具列">
+          <div class="batch-bar-top">
+            <span id="batch-selected-count" class="batch-selected-count">已選取 0 本書籍</span>
+            <div class="batch-bar-actions">
+              <button type="button" id="batch-select-all-btn" class="btn batch-tag-btn">全選目前清單</button>
+              <button type="button" id="batch-cancel-select-btn" class="btn batch-tag-btn">結束選取</button>
+            </div>
+          </div>
+          <div class="batch-tag-rows">
+            <div class="batch-tag-group">
+              <span class="batch-tag-label">作品狀態：</span>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-pub="ongoing">連載中</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-pub="completed">已完結</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-pub="oneshot">全一冊</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-pub="hiatus">斷尾</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-pub="">恢復自動</button>
+            </div>
+            <div class="batch-tag-group">
+              <span class="batch-tag-label">閱讀狀態：</span>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-read="unread">未讀</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-read="reading">正在讀</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-read="finished">已讀完</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-read="dropped">棄追</button>
+              <button type="button" class="status-pill batch-tag-btn" data-batch-read="">恢復自動</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Bookshelf Grid -->
       <section aria-label="小說書架清單">
         <div id="books-grid" class="books-grid"></div>
