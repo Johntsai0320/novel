@@ -121,6 +121,7 @@ function getProfileData(store, syncKey = 'default') {
       progress: {},
       bookmarks: {},
       annotations: {},
+      bookStatus: {},
       settings: {
         theme: 'sepia',
         fontSize: 19,
@@ -134,7 +135,46 @@ function getProfileData(store, syncKey = 'default') {
   if (!store.profiles[key].annotations) {
     store.profiles[key].annotations = {};
   }
+  if (!store.profiles[key].bookStatus) {
+    store.profiles[key].bookStatus = {};
+  }
   return store.profiles[key];
+}
+
+const VALID_PUB_STATUSES = new Set(['ongoing', 'completed', 'oneshot', 'hiatus']);
+const VALID_READ_STATUSES = new Set(['unread', 'reading', 'finished', 'dropped']);
+
+function deriveBookPubStatus(item, profile, bookId) {
+  const manual = profile?.bookStatus?.[bookId]?.pubStatus;
+  if (manual && VALID_PUB_STATUSES.has(manual)) return manual;
+  const target = `${item.folder || ''} ${item.filename || ''}`;
+  if (/完結|完结|完本|全本|全集|大結局|大结局|\(完\)|\[完\]|【完】/i.test(target)) {
+    return 'completed';
+  }
+  if (/連載|连载|更新中/i.test(target)) {
+    return 'ongoing';
+  }
+  if (/全一冊|全一册|單行本|单行本|短篇/i.test(target)) {
+    return 'oneshot';
+  }
+  if (/斷尾|断尾|斷更|断更|太監|太监|棄坑|弃坑/i.test(target)) {
+    return 'hiatus';
+  }
+  return '';
+}
+
+function deriveBookReadStatus(profile, bookId) {
+  const manual = profile?.bookStatus?.[bookId]?.readStatus;
+  if (manual && VALID_READ_STATUSES.has(manual)) return manual;
+  const prog = profile?.progress?.[bookId];
+  if (!prog) return 'unread';
+  const totalCh = Math.max(1, prog.totalChapters || 1);
+  const chIdx = prog.chapterIndex || 0;
+  const pct = prog.scrollPercent || 0;
+  if (chIdx >= totalCh - 1 && pct >= 92) {
+    return 'finished';
+  }
+  return 'reading';
 }
 
 /**
@@ -317,17 +357,23 @@ function getCachedNovelsList() {
 }
 
 /**
- * 2. List books with server-side pagination, boolean search, and folder filtering
+ * 2. List books with server-side pagination, boolean search, folder & status filtering
  */
 app.get('/api/books', async (req, res) => {
   try {
     const convertMode = req.query.convert || 's2twp';
+    const syncKey = req.query.syncKey || req.headers['x-sync-key'] || 'default';
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 60));
     const search = (req.query.q || '').trim();
     const folderFilter = req.query.folder || 'ALL';
     const formatFilter = req.query.format || 'ALL';
+    const pubStatusFilter = req.query.pubStatus || 'ALL';
+    const readStatusFilter = req.query.readStatus || 'ALL';
     const sortBy = req.query.sort || 'recent';
+
+    const syncStore = loadSyncStore();
+    const profile = getProfileData(syncStore, syncKey);
 
     const localFiles = getCachedNovelsList();
     let allFiles = localFiles;
@@ -360,7 +406,7 @@ app.get('/api/books', async (req, res) => {
       folderCounts[item.folder] = (folderCounts[item.folder] || 0) + 1;
     }
 
-    // Filter books
+    // Filter books by folder, format, and boolean search first
     let filtered = allFiles;
     if (folderFilter !== 'ALL') {
       filtered = filtered.filter((item) => item.folder === folderFilter);
@@ -378,21 +424,46 @@ app.get('/api/books', async (req, res) => {
       });
     }
 
-    // Sort books
-    if (sortBy === 'title') {
-      filtered.sort((a, b) => a.filename.localeCompare(b.filename, 'zh-Hant'));
-    } else if (sortBy === 'size') {
-      filtered.sort((a, b) => (b.size || 0) - (a.size || 0));
-    } else if (sortBy === 'mtime') {
-      filtered.sort((a, b) => (b.mtime || '').localeCompare(a.mtime || ''));
+    // Compute classification counts and filter by pubStatus / readStatus
+    const pubCounts = { ALL: filtered.length, ongoing: 0, completed: 0, oneshot: 0, hiatus: 0 };
+    const readCounts = { ALL: filtered.length, unread: 0, reading: 0, finished: 0, dropped: 0 };
+    const statusMatched = [];
+
+    for (const item of filtered) {
+      const id = item._id || (item._id = encodeBookId(item.source, item.relativePath));
+      const pStatus = deriveBookPubStatus(item, profile, id);
+      const rStatus = deriveBookReadStatus(profile, id);
+      if (pStatus && pubCounts[pStatus] !== undefined) pubCounts[pStatus]++;
+      if (rStatus && readCounts[rStatus] !== undefined) readCounts[rStatus]++;
+
+      if (pubStatusFilter !== 'ALL' && pStatus !== pubStatusFilter) continue;
+      if (readStatusFilter !== 'ALL' && rStatus !== readStatusFilter) continue;
+
+      statusMatched.push({ item, id, pStatus, rStatus });
     }
 
-    const totalCount = filtered.length;
-    const startIndex = (page - 1) * limit;
-    const pagedItems = filtered.slice(startIndex, startIndex + limit);
+    // Sort books
+    if (sortBy === 'recent') {
+      statusMatched.sort((a, b) => {
+        const ta = profile.progress?.[a.id]?.updatedAt || '';
+        const tb = profile.progress?.[b.id]?.updatedAt || '';
+        if (ta !== tb) return tb.localeCompare(ta);
+        return 0;
+      });
+    } else if (sortBy === 'title') {
+      statusMatched.sort((a, b) => a.item.filename.localeCompare(b.item.filename, 'zh-Hant'));
+    } else if (sortBy === 'size') {
+      statusMatched.sort((a, b) => (b.item.size || 0) - (a.item.size || 0));
+    } else if (sortBy === 'mtime') {
+      statusMatched.sort((a, b) => (b.item.mtime || '').localeCompare(a.item.mtime || ''));
+    }
 
-    // Convert & lazily stat only the 60 items on the current page (instant response!)
-    const books = pagedItems.map((item) => {
+    const totalCount = statusMatched.length;
+    const startIndex = (page - 1) * limit;
+    const pagedItems = statusMatched.slice(startIndex, startIndex + limit);
+
+    // Convert & lazily stat only the items on the current page (instant response!)
+    const books = pagedItems.map(({ item, id, pStatus, rStatus }) => {
       if (item.source === 'local' && !item.size && item.fullPath) {
         try {
           const st = fs.statSync(item.fullPath);
@@ -400,7 +471,6 @@ app.get('/api/books', async (req, res) => {
           item.mtime = st.mtime.toISOString();
         } catch (_) {}
       }
-      const id = encodeBookId(item.source, item.relativePath);
       const rawTitle = path.basename(item.filename, path.extname(item.filename));
       return {
         id,
@@ -412,6 +482,8 @@ app.get('/api/books', async (req, res) => {
         folder: convertText(item.folder, convertMode),
         originalFolder: item.folder,
         format: item.format,
+        pubStatus: pStatus,
+        readStatus: rStatus,
         size: item.size,
         mtime: item.mtime
       };
@@ -425,6 +497,7 @@ app.get('/api/books', async (req, res) => {
       limit,
       totalPages: Math.ceil(totalCount / limit),
       folders: folderCounts,
+      statusCounts: { pub: pubCounts, read: readCounts },
       novelsDir: NOVELS_DIR,
       books
     });
@@ -702,7 +775,7 @@ app.get('/api/sync', async (req, res) => {
 app.post('/api/sync', async (req, res) => {
   try {
     const syncKey = req.body.syncKey || req.headers['x-sync-key'] || 'default';
-    const { progress, bookmarks, annotations, settings, singleProgress } = req.body;
+    const { progress, bookmarks, annotations, bookStatus, settings, singleProgress } = req.body;
 
     const store = loadSyncStore();
     const profile = getProfileData(store, syncKey);
@@ -751,6 +824,25 @@ app.post('/api/sync', async (req, res) => {
         ...(profile.annotations || {}),
         ...annotations
       };
+    }
+
+    // Merge bookStatus classification (pubStatus & readStatus) if provided
+    if (bookStatus && typeof bookStatus === 'object') {
+      if (!profile.bookStatus) profile.bookStatus = {};
+      for (const [bId, item] of Object.entries(bookStatus)) {
+        if (!item || typeof item !== 'object') continue;
+        const existing = profile.bookStatus[bId];
+        if (
+          !existing ||
+          !existing.updatedAt ||
+          new Date(item.updatedAt || 0) >= new Date(existing.updatedAt)
+        ) {
+          profile.bookStatus[bId] = {
+            ...existing,
+            ...item
+          };
+        }
+      }
     }
 
     // Merge reader settings if provided

@@ -739,6 +739,47 @@
     </form>
   </div>
 
+  <!-- ====================================================================
+       MODAL: 單本書籍分類標記 (連載中/已完結 & 未讀/正在讀/已讀完)
+       ==================================================================== -->
+  <div id="book-status-modal" class="modal-dialog" role="dialog" aria-labelledby="book-status-modal-title">
+    <div class="modal-header">
+      <h2 id="book-status-modal-title">🏷️ 設定書籍分類狀態</h2>
+      <button type="button" id="close-status-modal-btn" class="btn" style="padding: 0.25rem 0.6rem;">✕</button>
+    </div>
+
+    <div class="form-group">
+      <div id="status-modal-book-name" style="font-family: var(--font-serif); font-weight: 700; font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-primary);"></div>
+
+      <label>作品狀態</label>
+      <div class="status-modal-pills" id="modal-pub-status-group">
+        <button type="button" class="status-pill" data-modal-pub="">未標記 / 自動</button>
+        <button type="button" class="status-pill" data-modal-pub="ongoing">連載中</button>
+        <button type="button" class="status-pill" data-modal-pub="completed">已完結</button>
+        <button type="button" class="status-pill" data-modal-pub="oneshot">全一冊</button>
+        <button type="button" class="status-pill" data-modal-pub="hiatus">斷尾</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>閱讀狀態</label>
+      <div class="status-modal-pills" id="modal-read-status-group">
+        <button type="button" class="status-pill" data-modal-read="">依進度自動</button>
+        <button type="button" class="status-pill" data-modal-read="unread">未讀</button>
+        <button type="button" class="status-pill" data-modal-read="reading">正在讀</button>
+        <button type="button" class="status-pill" data-modal-read="finished">已讀完</button>
+        <button type="button" class="status-pill" data-modal-read="dropped">棄追</button>
+      </div>
+      <div class="form-hint" style="margin-top: 0.5rem;">
+        💡 選擇「依進度自動」時，未開始將顯示「未讀」、閱讀中為「正在讀」、讀到末章最後自動標為「已讀完」；所有分類皆會跨裝置雲端同步。
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" id="close-status-modal-footer-btn" class="btn btn-primary">完成</button>
+    </div>
+  </div>
+
   <!-- Toast Notifications -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 

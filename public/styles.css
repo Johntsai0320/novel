@@ -172,6 +172,9 @@ body.eink-mode .modal-dialog,
 body.eink-mode .annotation-toolbar,
 body.eink-mode .comic-toolbar-banner,
 body.eink-mode .comic-pager-bar,
+body.eink-mode .batch-status-bar,
+body.eink-mode .status-pill,
+body.eink-mode .book-status-chip,
 body.eink-mode .btn {
   box-shadow: none !important;
   border-color: var(--border-strong);
@@ -723,6 +726,155 @@ button {
   color: var(--text-primary);
 }
 
+/* Two-Row Publication & Reading Status Classification Pills */
+.classification-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-bottom: 1.35rem;
+}
+
+.classification-row-split {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.status-pills-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.36rem 0.92rem;
+  border-radius: 999px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.status-pill:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.status-pill.active {
+  background: var(--accent);
+  color: #FFF9F2;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.status-pill-count {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  opacity: 0.78;
+}
+
+.status-pill.active .status-pill-count {
+  opacity: 0.92;
+}
+
+.select-mode-trigger {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  transition: all var(--transition-fast);
+  margin-left: auto;
+}
+
+.select-mode-trigger:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.select-mode-trigger.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-style: solid;
+  border-color: var(--accent-border);
+  font-weight: 600;
+}
+
+/* Batch Multi-Select Status Tagging Toolbar */
+.batch-status-bar {
+  margin-top: 0.35rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent-border);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.batch-bar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.batch-selected-count {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.batch-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.batch-tag-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.batch-tag-group {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  flex-wrap: wrap;
+}
+
+.batch-tag-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 68px;
+}
+
+.batch-tag-btn {
+  padding: 0.22rem 0.62rem;
+  font-size: 0.76rem;
+  border-radius: 999px;
+}
+
+.status-modal-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
 /* Bookshelf Grid */
 .books-grid {
   display: grid;
@@ -741,12 +893,46 @@ button {
   transition: transform var(--transition-fast), box-shadow var(--transition-fast), border-color var(--transition-fast);
   cursor: pointer;
   position: relative;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .book-card:hover {
   transform: translateY(-3px);
   box-shadow: var(--shadow-md);
   border-color: var(--accent-border);
+}
+
+.book-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.book-select-badge {
+  position: absolute;
+  top: 0.65rem;
+  right: 0.65rem;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: #FFF9F2;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  z-index: 2;
+}
+
+.book-card.selectable .book-select-badge {
+  display: flex;
+}
+
+.book-card.selected .book-select-badge {
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .book-card-top {
@@ -839,6 +1025,83 @@ button {
   font-size: 0.73rem;
   color: var(--text-muted);
   margin-top: 0.15rem;
+}
+
+.book-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.32rem;
+  margin-top: 0.25rem;
+}
+
+.book-status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+
+.book-status-chip.chip-pub-ongoing {
+  background: rgba(217, 119, 6, 0.12);
+  border-color: rgba(217, 119, 6, 0.35);
+  color: #B45309;
+}
+
+.book-status-chip.chip-pub-completed {
+  background: var(--success-soft);
+  border-color: rgba(45, 106, 79, 0.32);
+  color: var(--success);
+}
+
+.book-status-chip.chip-pub-oneshot {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.32);
+  color: #1D4ED8;
+}
+
+.book-status-chip.chip-pub-hiatus {
+  background: rgba(107, 114, 128, 0.14);
+  border-color: rgba(107, 114, 128, 0.32);
+  color: var(--text-muted);
+}
+
+.book-status-chip.chip-read-reading {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.book-status-chip.chip-read-finished {
+  background: var(--success-soft);
+  border-color: rgba(45, 106, 79, 0.35);
+  color: var(--success);
+}
+
+.book-status-chip.chip-read-dropped {
+  background: rgba(107, 114, 128, 0.14);
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.book-tag-btn {
+  padding: 0.1rem 0.42rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+}
+
+.book-tag-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .book-card-footer {

@@ -1647,6 +1647,18 @@
         }
       }
     }
+    if (remote.bookStatus && typeof remote.bookStatus === 'object') {
+      for (const [bookId, rStat] of Object.entries(remote.bookStatus)) {
+        const localStat = state.bookStatus[bookId];
+        if (
+          !localStat ||
+          !localStat.updatedAt ||
+          new Date(rStat.updatedAt || 0) >= new Date(localStat.updatedAt)
+        ) {
+          state.bookStatus[bookId] = rStat;
+        }
+      }
+    }
     if (remote.settings && typeof remote.settings === 'object') {
       state.settings = { ...state.settings, ...remote.settings };
       applyReaderSettingsToDOM();
@@ -1666,6 +1678,7 @@
           progress: state.progress,
           bookmarks: state.bookmarks,
           annotations: state.annotations,
+          bookStatus: state.bookStatus,
           settings: state.settings
         };
         await apiFetch('/api/sync', {
@@ -1683,6 +1696,7 @@
               progress: state.progress,
               bookmarks: state.bookmarks,
               annotations: state.annotations,
+              bookStatus: state.bookStatus,
               settings: state.settings
             }
           }
@@ -1769,10 +1783,13 @@
 
         const queryParams = new URLSearchParams({
           convert: state.settings.convertMode,
+          syncKey: state.syncKey || 'default',
           page: String(state.currentPage),
           limit: String(state.pageSize),
           folder: state.selectedFolder,
           format: state.selectedFormat,
+          pubStatus: state.selectedPubStatus || 'ALL',
+          readStatus: state.selectedReadStatus || 'ALL',
           sort: state.sortBy,
           q: state.searchQuery
         });
@@ -1783,6 +1800,7 @@
         state.totalBooksCount = booksRes.total || 0;
         state.totalPages = booksRes.totalPages || 1;
         state.folderCountsMap = booksRes.folders || {};
+        state.statusCounts = booksRes.statusCounts || null;
 
         connDot.classList.remove('offline');
         const countDisplay = (booksRes.totalAll || booksRes.total || 0).toLocaleString();
@@ -1876,9 +1894,161 @@
   function renderLibrary() {
     renderContinueReading();
     renderFolderTabs();
+    renderStatusFilterTabs();
+    renderBatchStatusBar();
     renderBooksGrid();
     renderPaginationBar();
     updateGlobalConvertButtonUI();
+  }
+
+  function computeClientStatusCounts() {
+    let baseBooks = state.books || [];
+    if (state.selectedFolder && state.selectedFolder !== 'ALL') {
+      baseBooks = baseBooks.filter(
+        (b) => (b.originalFolder || b.folder) === state.selectedFolder
+      );
+    }
+    if (state.selectedFormat && state.selectedFormat !== 'ALL') {
+      baseBooks = baseBooks.filter((b) => b.format === state.selectedFormat);
+    }
+    if (state.searchQuery && state.searchQuery.trim()) {
+      const matchQuery = compileBooleanQueryClient(state.searchQuery);
+      baseBooks = baseBooks.filter((b) => {
+        const target = `${b.originalTitle || ''} ${b.title || ''} ${b.originalFolder || ''} ${
+          b.folder || ''
+        } ${b.filename || ''}`.toLowerCase();
+        return matchQuery(target);
+      });
+    }
+
+    const pub = { ALL: baseBooks.length, ongoing: 0, completed: 0, oneshot: 0, hiatus: 0 };
+    const read = { ALL: baseBooks.length, unread: 0, reading: 0, finished: 0, dropped: 0 };
+    baseBooks.forEach((b) => {
+      const p = deriveBookPubStatusClient(b);
+      const r = deriveBookReadStatusClient(b);
+      if (p && pub[p] !== undefined) pub[p]++;
+      if (r && read[r] !== undefined) read[r]++;
+    });
+    return { pub, read };
+  }
+
+  function renderStatusFilterTabs() {
+    const counts = state.serverAvailable && state.statusCounts ? state.statusCounts : computeClientStatusCounts();
+    const pubLabels = {
+      ALL: '全部狀態',
+      ongoing: '連載中',
+      completed: '已完結',
+      oneshot: '全一冊',
+      hiatus: '斷尾'
+    };
+    const readLabels = {
+      ALL: '全部閱讀',
+      unread: '未讀',
+      reading: '正在讀',
+      finished: '已讀完',
+      dropped: '棄追'
+    };
+
+    document.querySelectorAll('#pub-status-tabs [data-pub-status]').forEach((btn) => {
+      const val = btn.dataset.pubStatus;
+      btn.classList.toggle('active', state.selectedPubStatus === val);
+      const cnt = counts?.pub?.[val];
+      btn.innerHTML =
+        typeof cnt === 'number' && cnt > 0
+          ? `${pubLabels[val] || val} <span class="status-pill-count">${cnt}</span>`
+          : `${pubLabels[val] || val}`;
+    });
+
+    document.querySelectorAll('#read-status-tabs [data-read-status]').forEach((btn) => {
+      const val = btn.dataset.readStatus;
+      btn.classList.toggle('active', state.selectedReadStatus === val);
+      const cnt = counts?.read?.[val];
+      btn.innerHTML =
+        typeof cnt === 'number' && cnt > 0
+          ? `${readLabels[val] || val} <span class="status-pill-count">${cnt}</span>`
+          : `${readLabels[val] || val}`;
+    });
+
+    const selectTriggerBtn = document.getElementById('toggle-select-mode-btn');
+    if (selectTriggerBtn) {
+      selectTriggerBtn.classList.toggle('active', state.selectionMode);
+      selectTriggerBtn.textContent = state.selectionMode
+        ? '✓ 選取模式中（點書卡勾選）'
+        : '長按進入選取模式';
+    }
+  }
+
+  function renderBatchStatusBar() {
+    const bar = document.getElementById('batch-status-bar');
+    const countEl = document.getElementById('batch-selected-count');
+    if (!bar) return;
+    bar.style.display = state.selectionMode ? 'flex' : 'none';
+    if (countEl) {
+      countEl.textContent = `已選取 ${state.selectedBookIds.size} 本書籍`;
+    }
+  }
+
+  function toggleSelectionMode(forceState = null) {
+    const next = forceState !== null ? Boolean(forceState) : !state.selectionMode;
+    state.selectionMode = next;
+    if (!next) {
+      state.selectedBookIds.clear();
+    }
+    renderStatusFilterTabs();
+    renderBatchStatusBar();
+    renderBooksGrid();
+  }
+
+  async function applyBookStatusUpdate(bookIds, patch) {
+    if (!Array.isArray(bookIds) || bookIds.length === 0) return;
+    const nowIso = new Date().toISOString();
+    bookIds.forEach((bookId) => {
+      const cur = state.bookStatus[bookId] || {};
+      const next = { ...cur, updatedAt: nowIso };
+      if (patch.pubStatus !== undefined) {
+        if (patch.pubStatus) next.pubStatus = patch.pubStatus;
+        else delete next.pubStatus;
+      }
+      if (patch.readStatus !== undefined) {
+        if (patch.readStatus) next.readStatus = patch.readStatus;
+        else delete next.readStatus;
+      }
+      if (!next.pubStatus && !next.readStatus) {
+        delete state.bookStatus[bookId];
+      } else {
+        state.bookStatus[bookId] = next;
+      }
+    });
+
+    await pushCloudSync();
+    if (state.serverAvailable) {
+      await loadLibrary(state.currentPage);
+    } else {
+      renderLibrary();
+    }
+  }
+
+  function openBookStatusModal(book) {
+    if (!book) return;
+    state.editingStatusBookId = book.id;
+    const titleEl = document.getElementById('status-modal-book-name');
+    if (titleEl) {
+      titleEl.textContent = convertStr(book.originalTitle || book.title);
+    }
+
+    const saved = state.bookStatus?.[book.id] || {};
+    const activePub = saved.pubStatus || '';
+    const activeRead = saved.readStatus || '';
+
+    document.querySelectorAll('#modal-pub-status-group [data-modal-pub]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.modalPub === activePub);
+    });
+    document.querySelectorAll('#modal-read-status-group [data-modal-read]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.modalRead === activeRead);
+    });
+
+    document.getElementById('drawer-backdrop').classList.add('open');
+    document.getElementById('book-status-modal').classList.add('open');
   }
 
   function renderContinueReading() {
@@ -1994,7 +2164,7 @@
 
     let displayBooks = state.books || [];
 
-    // When running in client-only mode (Direct WebDAV or Static Demo), apply boolean search & folder/format filter client-side
+    // When running in client-only mode (Direct WebDAV or Static Demo), apply boolean search & folder/format/status filter client-side
     if (!state.serverAvailable && displayBooks.length > 0) {
       if (state.selectedFolder && state.selectedFolder !== 'ALL') {
         displayBooks = displayBooks.filter(
@@ -2013,6 +2183,16 @@
           return matchQuery(target);
         });
       }
+      if (state.selectedPubStatus && state.selectedPubStatus !== 'ALL') {
+        displayBooks = displayBooks.filter(
+          (b) => deriveBookPubStatusClient(b) === state.selectedPubStatus
+        );
+      }
+      if (state.selectedReadStatus && state.selectedReadStatus !== 'ALL') {
+        displayBooks = displayBooks.filter(
+          (b) => deriveBookReadStatusClient(b) === state.selectedReadStatus
+        );
+      }
     }
 
     if (!displayBooks || displayBooks.length === 0) {
@@ -2028,19 +2208,41 @@
     displayBooks.forEach((book) => {
       const prog = state.progress[book.id];
       const toneClass = getCoverToneClass(book.id);
+      const pubStatus = deriveBookPubStatusClient(book);
+      const readStatus = deriveBookReadStatusClient(book);
+      const isSelected = state.selectedBookIds.has(book.id);
 
       let statusHtml = '尚未開始閱讀';
       let actionLabel = '開始閱讀 →';
 
-      if (prog) {
+      if (readStatus === 'finished') {
+        statusHtml = prog
+          ? `已讀完 · ${escapeHtml(convertStr(prog.chapterTitle || ''))}`
+          : '已標記為讀完';
+        actionLabel = '重溫 →';
+      } else if (readStatus === 'dropped') {
+        statusHtml = '已標記為棄追';
+        actionLabel = '繼續閱讀 →';
+      } else if (prog) {
         const chName = convertStr(prog.chapterTitle || `第 ${(prog.chapterIndex || 0) + 1} 章`);
         statusHtml = `讀至：${escapeHtml(chName)}`;
         actionLabel = '繼續閱讀 →';
       }
 
+      const pubBadgeHtml = pubStatus
+        ? `<span class="book-status-chip chip-pub-${pubStatus}">${PUB_STATUS_LABELS[pubStatus]}</span>`
+        : '';
+      const readBadgeHtml = `<span class="book-status-chip chip-read-${readStatus}">${
+        READ_STATUS_LABELS[readStatus] || '未讀'
+      }</span>`;
+
       const card = document.createElement('article');
-      card.className = 'book-card';
+      card.className = `book-card${state.selectionMode ? ' selectable' : ''}${
+        isSelected ? ' selected' : ''
+      }`;
+      card.dataset.bookId = book.id;
       card.innerHTML = `
+        <span class="book-select-badge" aria-hidden="true">${isSelected ? '✓' : ''}</span>
         <div class="book-card-top">
           <div class="book-cover ${toneClass}">
             <div class="book-cover-title">${escapeHtml(book.title)}</div>
@@ -2052,15 +2254,79 @@
             <div class="book-details-line">
               ${formatBytes(book.size)} · ${book.source.includes('webdav') ? 'WebDAV 遠端' : 'NAS 書庫'}
             </div>
+            <div class="book-status-badges">
+              ${pubBadgeHtml}
+              ${readBadgeHtml}
+              <button type="button" class="book-tag-btn" title="更改作品狀態（連載中/已完結）或閱讀狀態">🏷️ 分類</button>
+            </div>
           </div>
         </div>
         <div class="book-card-footer">
           <span class="book-status-text">${statusHtml}</span>
-          <span class="book-read-action">${actionLabel}</span>
+          <span class="book-read-action">${state.selectionMode ? (isSelected ? '已選取' : '點擊選取') : actionLabel}</span>
         </div>
       `;
 
-      card.addEventListener('click', () => {
+      const tagBtn = card.querySelector('.book-tag-btn');
+      if (tagBtn) {
+        tagBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openBookStatusModal(book);
+        });
+      }
+
+      // Long-press (520ms) to enter selection mode cleanly on touch / mouse / stylus
+      let longPressTimer = null;
+      let longPressTriggered = false;
+      let startX = 0;
+      let startY = 0;
+
+      const cancelLongPress = () => {
+        if (longPressTimer) {
+          clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+      };
+
+      card.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('.book-tag-btn')) return;
+        if (state.selectionMode) return;
+        longPressTriggered = false;
+        startX = e.clientX;
+        startY = e.clientY;
+        longPressTimer = setTimeout(() => {
+          longPressTriggered = true;
+          state.selectedBookIds.add(book.id);
+          toggleSelectionMode(true);
+          showToast('☑️ 已進入選取模式，可繼續點選其他書籍批次標記狀態');
+        }, 520);
+      });
+
+      card.addEventListener('pointermove', (e) => {
+        if (!longPressTimer) return;
+        if (Math.abs(e.clientX - startX) > 10 || Math.abs(e.clientY - startY) > 10) {
+          cancelLongPress();
+        }
+      });
+      card.addEventListener('pointerup', cancelLongPress);
+      card.addEventListener('pointercancel', cancelLongPress);
+
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.book-tag-btn')) return;
+        if (longPressTriggered) {
+          longPressTriggered = false;
+          return;
+        }
+        if (state.selectionMode) {
+          if (state.selectedBookIds.has(book.id)) {
+            state.selectedBookIds.delete(book.id);
+          } else {
+            state.selectedBookIds.add(book.id);
+          }
+          renderBatchStatusBar();
+          renderBooksGrid();
+          return;
+        }
         const startChapter = prog ? prog.chapterIndex || 0 : 0;
         const startScroll = prog ? prog.scrollPercent || 0 : 0;
         openBookReader(book.id, startChapter, startScroll);
@@ -3013,6 +3279,10 @@
 
   function closeReaderView() {
     scheduleProgressSync();
+    if (syncTimeout) {
+      clearTimeout(syncTimeout);
+      syncTimeout = null;
+    }
     hideSelectionPopover();
     revokeComicBlobUrls();
     state.currentComicPages = [];
@@ -3025,6 +3295,17 @@
     closeDrawer();
     document.getElementById('library-view').style.display = 'block';
     renderLibrary();
+    if (state.serverAvailable) {
+      pushCloudSync().then(() => {
+        if (
+          state.selectedPubStatus !== 'ALL' ||
+          state.selectedReadStatus !== 'ALL' ||
+          state.sortBy === 'recent'
+        ) {
+          loadLibrary(state.currentPage);
+        }
+      });
+    }
   }
 
   function isVerticalMode() {
@@ -5225,6 +5506,119 @@
       }
     });
 
+    // Book Classification Pill Filters, Multi-Select Batch Tagging & Single-Book Status Modal
+    document.querySelectorAll('#pub-status-tabs [data-pub-status]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.selectedPubStatus = btn.dataset.pubStatus || 'ALL';
+        state.currentPage = 1;
+        if (state.serverAvailable) {
+          loadLibrary(1);
+        } else {
+          renderLibrary();
+        }
+      });
+    });
+
+    document.querySelectorAll('#read-status-tabs [data-read-status]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.selectedReadStatus = btn.dataset.readStatus || 'ALL';
+        state.currentPage = 1;
+        if (state.serverAvailable) {
+          loadLibrary(1);
+        } else {
+          renderLibrary();
+        }
+      });
+    });
+
+    const toggleSelectBtn = document.getElementById('toggle-select-mode-btn');
+    if (toggleSelectBtn) {
+      toggleSelectBtn.addEventListener('click', () => {
+        toggleSelectionMode();
+      });
+    }
+
+    const selectAllBtn = document.getElementById('batch-select-all-btn');
+    if (selectAllBtn) {
+      selectAllBtn.addEventListener('click', () => {
+        document.querySelectorAll('#books-grid .book-card[data-book-id]').forEach((el) => {
+          state.selectedBookIds.add(el.dataset.bookId);
+        });
+        renderBatchStatusBar();
+        renderBooksGrid();
+      });
+    }
+
+    const cancelSelectBtn = document.getElementById('batch-cancel-select-btn');
+    if (cancelSelectBtn) {
+      cancelSelectBtn.addEventListener('click', () => {
+        toggleSelectionMode(false);
+      });
+    }
+
+    document.querySelectorAll('[data-batch-pub]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const ids = Array.from(state.selectedBookIds);
+        if (ids.length === 0) {
+          showToast('請先點選至少一本書籍');
+          return;
+        }
+        const val = btn.dataset.batchPub || '';
+        await applyBookStatusUpdate(ids, { pubStatus: val });
+        showToast(
+          val
+            ? `✅ 已將 ${ids.length} 本書籍設為「${PUB_STATUS_LABELS[val]}」`
+            : `✅ 已清除 ${ids.length} 本書籍的作品狀態標記`
+        );
+      });
+    });
+
+    document.querySelectorAll('[data-batch-read]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const ids = Array.from(state.selectedBookIds);
+        if (ids.length === 0) {
+          showToast('請先點選至少一本書籍');
+          return;
+        }
+        const val = btn.dataset.batchRead || '';
+        await applyBookStatusUpdate(ids, { readStatus: val });
+        showToast(
+          val
+            ? `✅ 已將 ${ids.length} 本書籍設為「${READ_STATUS_LABELS[val]}」`
+            : `✅ 已將 ${ids.length} 本書籍設為「依進度自動判定」`
+        );
+      });
+    });
+
+    document.querySelectorAll('#modal-pub-status-group [data-modal-pub]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!state.editingStatusBookId) return;
+        const val = btn.dataset.modalPub || '';
+        document.querySelectorAll('#modal-pub-status-group [data-modal-pub]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+        });
+        await applyBookStatusUpdate([state.editingStatusBookId], { pubStatus: val });
+        showToast(val ? `作品狀態：${PUB_STATUS_LABELS[val]}` : '已恢復自動偵測作品狀態');
+      });
+    });
+
+    document.querySelectorAll('#modal-read-status-group [data-modal-read]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!state.editingStatusBookId) return;
+        const val = btn.dataset.modalRead || '';
+        document.querySelectorAll('#modal-read-status-group [data-modal-read]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+        });
+        await applyBookStatusUpdate([state.editingStatusBookId], { readStatus: val });
+        showToast(val ? `閱讀狀態：${READ_STATUS_LABELS[val]}` : '已恢復依進度自動判定');
+      });
+    });
+
+    const closeStatusModalBtn = document.getElementById('close-status-modal-btn');
+    if (closeStatusModalBtn) closeStatusModalBtn.addEventListener('click', closeModals);
+    const closeStatusModalFooterBtn = document.getElementById('close-status-modal-footer-btn');
+    if (closeStatusModalFooterBtn) closeStatusModalFooterBtn.addEventListener('click', closeModals);
+
     // Homepage Feature Overview Collapse/Expand Toggle
     const introSection = document.getElementById('feature-intro-section');
     const toggleIntroBtn = document.getElementById('toggle-feature-intro-btn');
@@ -5272,6 +5666,9 @@
     document.getElementById('drawer-backdrop').classList.remove('open');
     document.getElementById('nas-modal').classList.remove('open');
     document.getElementById('upload-modal').classList.remove('open');
+    const statusModal = document.getElementById('book-status-modal');
+    if (statusModal) statusModal.classList.remove('open');
+    state.editingStatusBookId = null;
   }
 
   // ==========================================================================
