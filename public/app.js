@@ -3383,6 +3383,7 @@
   ) {
     const usable = Math.max(240, viewportHeight);
     const step = Math.max(160, Math.floor(usable * overlapRatio));
+    const minMeaningfulJump = Math.min(step, Math.max(160, Math.floor(usable * 0.25)));
 
     if (direction === 'next') {
       if (maxScroll - currentScrollY <= 40) {
@@ -3392,7 +3393,7 @@
         for (let i = 0; i < pagesRects.length; i++) {
           const rect = pagesRects[i];
           if (rect.bottom > usable + 4) {
-            if (rect.top > 8) {
+            if (rect.top >= minMeaningfulJump || (rect.top >= 48 && rect.height <= usable + 8)) {
               return {
                 action: 'scroll',
                 targetY: Math.min(
@@ -3402,7 +3403,7 @@
               };
             }
             const remainingInPage = rect.bottom - usable;
-            if (remainingInPage <= step * 1.15) {
+            if (remainingInPage >= minMeaningfulJump && remainingInPage <= step * 1.15) {
               return {
                 action: 'scroll',
                 targetY: Math.min(
@@ -3410,6 +3411,15 @@
                   Math.max(currentScrollY + 1, Math.round(currentScrollY + remainingInPage))
                 )
               };
+            }
+            if (remainingInPage < minMeaningfulJump && i + 1 < pagesRects.length) {
+              const nextRect = pagesRects[i + 1];
+              if (nextRect.top >= minMeaningfulJump) {
+                return {
+                  action: 'scroll',
+                  targetY: Math.min(maxScroll, Math.round(currentScrollY + nextRect.top))
+                };
+              }
             }
             return {
               action: 'scroll',
@@ -3429,11 +3439,24 @@
         const rect = pagesRects[i];
         if (rect.bottom > 12) {
           if (rect.top < -8) {
-            if (rect.height <= usable + 8 || -rect.top <= step * 1.15) {
+            const hiddenTop = -rect.top;
+            if (
+              (hiddenTop >= minMeaningfulJump || (hiddenTop >= 48 && rect.height <= usable + 8)) &&
+              hiddenTop <= step * 1.15
+            ) {
               return {
                 action: 'scroll',
                 targetY: Math.max(0, Math.round(currentScrollY + rect.top))
               };
+            }
+            if (hiddenTop < minMeaningfulJump && i > 0) {
+              const prevRect = pagesRects[i - 1];
+              if (prevRect.height <= usable + 8 && -prevRect.top >= minMeaningfulJump) {
+                return {
+                  action: 'scroll',
+                  targetY: Math.max(0, Math.round(currentScrollY + prevRect.top))
+                };
+              }
             }
             return {
               action: 'scroll',
@@ -3442,7 +3465,7 @@
           }
           if (i > 0) {
             const prevRect = pagesRects[i - 1];
-            if (prevRect.height <= usable + 8) {
+            if (prevRect.height <= usable + 8 && -prevRect.top >= minMeaningfulJump) {
               return {
                 action: 'scroll',
                 targetY: Math.max(0, Math.round(currentScrollY + prevRect.top))
@@ -3450,7 +3473,10 @@
             }
             return {
               action: 'scroll',
-              targetY: Math.max(0, Math.round(currentScrollY + Math.max(prevRect.top, -step)))
+              targetY: Math.max(
+                0,
+                Math.round(currentScrollY + Math.min(-minMeaningfulJump, Math.max(prevRect.top, -step)))
+              )
             };
           }
           break;
@@ -3458,6 +3484,15 @@
       }
     }
     return { action: 'scroll', targetY: Math.max(0, currentScrollY - step) };
+  }
+
+  function resolveTapFlipAction(ratio, flipMode = 'both') {
+    if (flipMode === 'off') return 'none';
+    if (flipMode === 'next_only') return 'next';
+    if (flipMode === 'left_next') {
+      return ratio <= 0.65 ? 'next' : 'prev';
+    }
+    return ratio >= 0.35 ? 'next' : 'prev';
   }
 
   function getVisibleComicPageRects() {
@@ -3804,6 +3839,7 @@
         const dx = e.changedTouches[0].clientX - touchStartX;
         const dy = e.changedTouches[0].clientY - touchStartY;
         if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+          state.lastComicSwipeAt = Date.now();
           if (dir === 'rtl') {
             if (dx > 0) comicNextPage();
             else comicPrevPage();
@@ -3815,6 +3851,16 @@
       },
       { passive: true }
     );
+
+    const flipMode = state.settings.clickFlip || 'both';
+    const tapHintText =
+      flipMode === 'left_next'
+        ? '點左側畫面下一頁'
+        : flipMode === 'next_only'
+        ? '點擊畫面任意處下一頁'
+        : flipMode === 'off'
+        ? '點擊翻頁已關閉'
+        : '點擊右側畫面下一頁';
 
     // Bottom Pager Control Bar with Range Slider
     const pagerBar = document.createElement('div');
@@ -3830,8 +3876,8 @@
       <div class="comic-pager-hint">
         ${
           dir === 'rtl'
-            ? '日漫模式（右→左）：點擊左側畫面／按 ← 方向鍵 翻下一頁'
-            : '美漫模式（左→右）：點擊右側畫面／按 → 方向鍵 翻下一頁'
+            ? `日漫排序（右→左）：${tapHintText}／按 ← 方向鍵 翻下一頁`
+            : `美漫排序（左→右）：${tapHintText}／按 → 方向鍵 翻下一頁`
         }
       </div>
     `;
@@ -5780,14 +5826,43 @@
       }
     }
 
-    // Tap reader canvas to flip page/chapter (or interact with highlights)
-    document.getElementById('reader-canvas').addEventListener('click', (e) => {
+    // Tap reader view (including outer margins) to flip page/chapter (or interact with highlights)
+    const readerViewEl = document.getElementById('reader-view');
+    const READER_INTERACTIVE_IGNORE =
+      'button, a, input, select, textarea, .reader-topbar, #fullscreen-floating-hud, #reader-settings-popover, #annotation-toolbar, #text-selection-popover, .comic-toolbar-banner, .comic-pager-bar, .pdf-reflow-banner, .chapter-footer-nav';
+    let comicTouchTap = null;
+    let comicTapFallbackTimer = null;
+
+    const executeReaderTapFlip = (clientX) => {
+      if (!readerViewEl || !readerViewEl.classList.contains('active')) return;
+      if (state.annotTool !== 'read') return;
+      const flipMode = state.settings.clickFlip || 'both';
+      if (flipMode === 'off') return;
+
+      const winWidth = window.innerWidth || document.documentElement.clientWidth || 1;
+      const ratio = clientX / winWidth;
+      const action = resolveTapFlipAction(ratio, flipMode);
+      if (action === 'none') return;
+
+      if (isComicPagedMode()) {
+        if (action === 'next') comicNextPage();
+        else comicPrevPage();
+        return;
+      }
+
+      if (action === 'next') {
+        flipToNextPageOrChapter();
+      } else {
+        flipToPrevPageOrChapter();
+      }
+    };
+
+    readerViewEl.addEventListener('click', (e) => {
+      if (!readerViewEl.classList.contains('active')) return;
+      if (Date.now() - (state.lastComicSwipeAt || 0) < 350) return;
+
       // Ignore if user clicked a button, link, form control, comic toolbar/pager, or annotation UI
-      if (
-        e.target.closest(
-          'button, a, input, select, textarea, #annotation-toolbar, #text-selection-popover, .comic-toolbar-banner, .comic-pager-bar, .pdf-reflow-banner'
-        )
-      ) {
+      if (e.target.closest(READER_INTERACTIVE_IGNORE)) {
         return;
       }
 
@@ -5815,8 +5890,10 @@
         return;
       }
 
-      const selection = window.getSelection();
-      if (selection && selection.toString().trim().length > 0) return;
+      if (!isComicBookActive()) {
+        const selection = window.getSelection();
+        if (selection && selection.toString().trim().length > 0) return;
+      }
 
       const popover = document.getElementById('reader-settings-popover');
       if (popover.classList.contains('open')) {
@@ -5827,50 +5904,79 @@
       // Do not flip page when actively using highlighter/pen/eraser tools
       if (state.annotTool !== 'read') return;
 
-      const flipMode = state.settings.clickFlip || 'both';
-      if (flipMode === 'off') return;
+      if (comicTapFallbackTimer) {
+        clearTimeout(comicTapFallbackTimer);
+        comicTapFallbackTimer = null;
+      }
+      state.lastReaderClickAt = Date.now();
+      executeReaderTapFlip(e.clientX);
+    });
 
-      const winWidth = window.innerWidth || document.documentElement.clientWidth;
-      const clickX = e.clientX;
-      const ratio = clickX / winWidth;
-
-      if (isComicPagedMode()) {
-        if (flipMode === 'next_only') {
-          comicNextPage();
+    // E-Ink / mobile touch-wobble fallback: if finger jitters slightly (<= 18px) and WebView drops click, still flip reliably
+    readerViewEl.addEventListener(
+      'touchstart',
+      (e) => {
+        if (comicTapFallbackTimer) {
+          clearTimeout(comicTapFallbackTimer);
+          comicTapFallbackTimer = null;
+        }
+        if (
+          e.touches.length !== 1 ||
+          !isComicBookActive() ||
+          state.annotTool !== 'read' ||
+          e.target.closest(READER_INTERACTIVE_IGNORE)
+        ) {
+          comicTouchTap = null;
           return;
         }
-        const comicDir = state.settings.comicDirection || 'rtl';
-        const isNextZone = comicDir === 'rtl' ? ratio <= 0.6 : ratio >= 0.4;
-        if (isNextZone) {
-          comicNextPage();
-        } else {
-          comicPrevPage();
+        comicTouchTap = {
+          x: e.touches[0].clientX,
+          y: e.touches[0].clientY,
+          t: Date.now()
+        };
+      },
+      { passive: true }
+    );
+    readerViewEl.addEventListener(
+      'touchmove',
+      (e) => {
+        if (!comicTouchTap || e.touches.length !== 1) {
+          comicTouchTap = null;
+          return;
         }
-        return;
-      }
-
-      if (flipMode === 'next_only') {
-        flipToNextPageOrChapter();
-        return;
-      }
-
-      if (flipMode === 'left_next') {
-        // Left 65% flips to next page/chapter, Right 35% flips to prev page/chapter
-        if (ratio <= 0.65) {
-          flipToNextPageOrChapter();
-        } else {
-          flipToPrevPageOrChapter();
+        const dx = e.touches[0].clientX - comicTouchTap.x;
+        const dy = e.touches[0].clientY - comicTouchTap.y;
+        if (Math.hypot(dx, dy) > 18) {
+          comicTouchTap = null;
         }
-        return;
-      }
-
-      // 'both' mode: Right 65% flips to next page/chapter, Left 35% flips to prev page/chapter
-      if (ratio >= 0.35) {
-        flipToNextPageOrChapter();
-      } else {
-        flipToPrevPageOrChapter();
-      }
-    });
+      },
+      { passive: true }
+    );
+    readerViewEl.addEventListener(
+      'touchend',
+      (e) => {
+        const tap = comicTouchTap;
+        comicTouchTap = null;
+        if (!tap || !e.changedTouches || e.changedTouches.length !== 1) return;
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - tap.x;
+        const dy = touch.clientY - tap.y;
+        const dt = Date.now() - tap.t;
+        if (Math.hypot(dx, dy) > 18 || dt > 450) return;
+        const tapX = touch.clientX;
+        const tapStartAt = tap.t;
+        comicTapFallbackTimer = setTimeout(() => {
+          comicTapFallbackTimer = null;
+          if ((state.lastReaderClickAt || 0) >= tapStartAt) return;
+          if ((state.lastComicSwipeAt || 0) >= tapStartAt) return;
+          const popover = document.getElementById('reader-settings-popover');
+          if (popover && popover.classList.contains('open')) return;
+          state.lastReaderClickAt = Date.now();
+          executeReaderTapFlip(tapX);
+        }, 70);
+      },
+      { passive: true }
+    );
 
     // Text Selection for Highlighter & Notes
     const handleTextSelectionEnd = () => {

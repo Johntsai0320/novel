@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nas-novel-shell-v2';
+const CACHE_NAME = 'nas-novel-shell-v3';
 const SHELL_ASSETS = [
   './',
   './index.html',
