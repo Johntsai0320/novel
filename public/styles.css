@@ -197,6 +197,24 @@ body.eink-mode .chapter-content {
   text-rendering: optimizeLegibility;
 }
 
+body.eink-mode .library-container {
+  padding-bottom: calc(6.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+body.eink-mode .reader-canvas-wrapper {
+  padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
+}
+
+body.eink-mode .reader-canvas-wrapper.vertical-mode {
+  height: calc(100vh - 64px);
+  height: calc(100dvh - 64px);
+  padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+body.eink-mode .toast-container {
+  bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+}
+
 /* Kaleido 3 Color E-Ink highlight boost for clearer contrast */
 body.eink-mode mark.reader-highlight.hl-yellow {
   background: rgba(255, 215, 0, 0.48);
@@ -430,7 +448,7 @@ button {
 .library-container {
   max-width: 1320px;
   margin: 0 auto;
-  padding: 1.5rem 1.5rem 4rem;
+  padding: 1.5rem 1.5rem calc(5.5rem + env(safe-area-inset-bottom, 0px));
 }
 
 /* Feature Overview Card */
@@ -1260,7 +1278,7 @@ button {
 .reader-canvas-wrapper {
   max-width: var(--reader-max-width);
   margin: 0 auto;
-  padding: 2.5rem 1.5rem 5rem;
+  padding: 2.5rem 1.5rem calc(6.5rem + env(safe-area-inset-bottom, 0px));
   transition: max-width var(--transition-med);
 }
 
@@ -2046,7 +2064,7 @@ mark.reader-highlight.has-note::after {
   height: calc(100vh - 60px);
   height: calc(100dvh - 60px);
   margin: 0;
-  padding: 2rem 2.25rem;
+  padding: 1.75rem 2.25rem calc(4.25rem + env(safe-area-inset-bottom, 0px));
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;

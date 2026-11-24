@@ -300,7 +300,7 @@
   };
 
   function isEinkBrowserUA() {
-    return /EinkBro|Onyx|BOOX/i.test(navigator.userAgent || '');
+    return /EinkBro|Onyx|BOOX|NoteAir|TabUltra|Palma|Poke|Leaf|Nova|Mira/i.test(navigator.userAgent || '');
   }
 
   function isEinkActive() {
@@ -315,7 +315,7 @@
   }
 
   function getPageFlipOverlapRatio() {
-    return isEinkActive() ? 0.92 : 0.85;
+    return isEinkActive() ? 0.84 : 0.85;
   }
 
   function formatTurnerKeyLabel(e) {
