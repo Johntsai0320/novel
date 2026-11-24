@@ -276,6 +276,7 @@
       comicDirection: 'rtl',     // 'rtl' (日漫右至左) | 'ltr' (左至右)
       comicFit: 'fit-width',     // 'fit-width' | 'fit-contain' | 'original'
       einkMode: 'auto',          // 'auto' (偵測 EinkBro/BOOX) | 'on' | 'off'
+      bottomSafePx: 'auto',      // 'auto' | 0 | 64 | 96 | 128 (EInkBro 底部工具列避讓留白)
       einkStylusOnly: false,     // BOOX 電磁筆防誤觸：僅限 pen 指標畫線，手指保留捲動
       pageTurnerMode: 'page',    // 'page' (標準頁內翻頁) | 'swapped' (反轉握持) | 'chapter' (整章切換)
       pageTurnerNextKey: '',     // Learned custom key token "code|key|keyCode|label"
@@ -295,6 +296,8 @@
     activeDrawerTab: 'toc',
     tocSearchQuery: '',
     isRestoringScroll: false,
+    readerFullscreen: false,
+    nativeFullscreenEntered: false,
     annotToolbarOpen: false,
     annotTool: 'read',      // 'read' | 'highlighter' | 'pen' | 'eraser'
     annotColor: 'yellow',   // 'yellow' | 'green' | 'blue' | 'pink'
@@ -307,11 +310,38 @@
     return /EinkBro|Onyx|BOOX|NoteAir|TabUltra|Palma|Poke|Leaf|Nova|Mira/i.test(navigator.userAgent || '');
   }
 
+  function isLikelyAndroidOrEink() {
+    if (isEinkBrowserUA()) return true;
+    const ua = navigator.userAgent || '';
+    if (/Android|Mobile|Tablet|iPad/i.test(ua)) return true;
+    try {
+      if (
+        (navigator.maxTouchPoints || 0) > 0 &&
+        window.matchMedia &&
+        window.matchMedia('(pointer: coarse)').matches
+      ) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   function isEinkActive() {
     const mode = state.settings.einkMode || 'auto';
     if (mode === 'on') return true;
     if (mode === 'off') return false;
     return isEinkBrowserUA();
+  }
+
+  function getEffectiveBottomSafePx() {
+    if (state.readerFullscreen) return 0;
+    const pref = state.settings.bottomSafePx;
+    if (pref === 0 || pref === '0') return 0;
+    const num = Number(pref);
+    if (Number.isFinite(num) && num > 0) return num;
+    if (isEinkActive()) return 104;
+    if (isLikelyAndroidOrEink()) return 88;
+    return 0;
   }
 
   function getScrollBehavior() {
@@ -3511,6 +3541,9 @@
         <button type="button" class="btn comic-btn-sm" id="comic-banner-fit-btn" title="切換圖片縮放方式">
           ${fitLabelMap[fit] || '📐 適寬'}
         </button>
+        <button type="button" class="btn comic-btn-sm ${state.readerFullscreen ? 'btn-pill-active' : ''}" id="comic-banner-fullscreen-btn" title="全螢幕滿版閱讀（隱藏工具列與標題，適合看漫畫）">
+          ⛶ 全螢幕
+        </button>
         <span class="comic-toolbar-info" style="font-family: var(--font-mono); margin-left: 0.25rem;">${pageSummary}</span>
       </div>
     `;
@@ -3529,8 +3562,15 @@
       e.stopPropagation();
       setComicFit(fitNextMap[fit] || 'fit-width');
     });
+    banner.querySelector('#comic-banner-fullscreen-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleReaderFullscreen();
+    });
 
     bodyEl.appendChild(banner);
+    if (typeof updateFullscreenHUDInfo === 'function') {
+      updateFullscreenHUDInfo();
+    }
 
     const buildPageEl = (pageObj, eager = false) => {
       const wrap = document.createElement('div');
@@ -3866,7 +3906,7 @@
       pdfWrapper.innerHTML = `
         <iframe
           src="${escapeHtml(pdfSrc)}"
-          style="width: 100%; height: 80vh; border: none; display: block;"
+          style="width: 100%; height: 78vh; height: calc(100dvh - 150px - var(--eink-bottom-safe, 0px)); border: none; display: block;"
           title="${escapeHtml(displayBookTitle)}"
         ></iframe>
       `;
@@ -4001,6 +4041,9 @@
   }
 
   function closeReaderView() {
+    if (state.readerFullscreen) {
+      setReaderFullscreen(false, { silent: true });
+    }
     scheduleProgressSync();
     if (syncTimeout) {
       clearTimeout(syncTimeout);
@@ -4073,6 +4116,7 @@
     const pct = calculateCurrentScrollPercent();
     const fill = document.getElementById('reader-ribbon-fill');
     if (fill) fill.style.width = `${pct}%`;
+    if (state.readerFullscreen) updateFullscreenHUDInfo();
   }
 
   // ==========================================================================
@@ -4741,6 +4785,123 @@
         statusEl.textContent = '自訂按鍵：尚未綁定（預設支援 PgUp/PgDn/方向鍵/空白/音量鍵）';
       }
     }
+
+    // Bottom Safe Clearance UI (EInkBro non-reader mode protection)
+    const bottomSafePref = s.bottomSafePx === undefined ? 'auto' : String(s.bottomSafePx);
+    const effectiveBottomPx = getEffectiveBottomSafePx();
+    const bottomSafeLabel = document.getElementById('bottom-safe-label');
+    if (bottomSafeLabel) {
+      bottomSafeLabel.textContent =
+        bottomSafePref === 'auto'
+          ? `自動 (${effectiveBottomPx}px)`
+          : effectiveBottomPx === 0
+          ? '關閉 (0px)'
+          : `${effectiveBottomPx}px`;
+    }
+    document.querySelectorAll('[data-bottom-safe-opt]').forEach((b) => {
+      b.classList.toggle('active', String(b.dataset.bottomSafeOpt) === bottomSafePref);
+    });
+
+    const fsBtn = document.getElementById('reader-fullscreen-btn');
+    if (fsBtn) {
+      fsBtn.classList.toggle('btn-pill-active', Boolean(state.readerFullscreen));
+    }
+    const comicFsBtn = document.getElementById('comic-banner-fullscreen-btn');
+    if (comicFsBtn) {
+      comicFsBtn.classList.toggle('btn-pill-active', Boolean(state.readerFullscreen));
+    }
+  }
+
+  function setBottomSafePx(rawVal) {
+    if (rawVal === 'auto' || rawVal === undefined || rawVal === null) {
+      state.settings.bottomSafePx = 'auto';
+    } else {
+      const n = Number(rawVal);
+      state.settings.bottomSafePx = Number.isFinite(n) && n >= 0 ? n : 'auto';
+    }
+    applyReaderSettingsToDOM();
+    pushCloudSync();
+    const px = getEffectiveBottomSafePx();
+    showToast(
+      px > 0
+        ? `📐 已設定底部防遮擋留白 ${px}px（避開 EInkBro 底部工具列）`
+        : '📐 已關閉額外底部防遮擋留白'
+    );
+  }
+
+  function updateFullscreenHUDInfo() {
+    const infoEl = document.getElementById('fullscreen-hud-info');
+    if (!infoEl) return;
+    if (isComicBookActive() && state.currentComicPages.length > 0) {
+      const total = state.currentComicPages.length;
+      const mode = state.settings.comicMode || 'scroll';
+      if (mode === 'double' && state.comicCurrentPage + 1 < total) {
+        infoEl.textContent = `${state.comicCurrentPage + 1}-${state.comicCurrentPage + 2} / ${total} 頁`;
+      } else if (mode === 'scroll') {
+        infoEl.textContent = `條漫 · 共 ${total} 頁`;
+      } else {
+        infoEl.textContent = `${state.comicCurrentPage + 1} / ${total} 頁`;
+      }
+      return;
+    }
+    if (state.currentChapter && state.currentBook) {
+      infoEl.textContent = `${state.currentChapter.index + 1} / ${state.currentBook.totalChapters} 章`;
+      return;
+    }
+    infoEl.textContent = '全螢幕閱讀';
+  }
+
+  async function setReaderFullscreen(enabled, options = {}) {
+    const next = Boolean(enabled);
+    state.readerFullscreen = next;
+    document.body.classList.toggle('reader-fullscreen', next);
+
+    if (next) {
+      document.getElementById('reader-settings-popover')?.classList.remove('open');
+      closeDrawer();
+      updateFullscreenHUDInfo();
+      const rootEl = document.documentElement;
+      const reqFs =
+        rootEl.requestFullscreen ||
+        rootEl.webkitRequestFullscreen ||
+        rootEl.mozRequestFullScreen ||
+        rootEl.msRequestFullscreen;
+      if (reqFs && !document.fullscreenElement && !document.webkitFullscreenElement) {
+        try {
+          await reqFs.call(rootEl);
+          state.nativeFullscreenEntered = true;
+        } catch (_) {
+          state.nativeFullscreenEntered = false;
+        }
+      }
+    } else {
+      state.nativeFullscreenEntered = false;
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if (fsEl) {
+        const exitFs =
+          document.exitFullscreen ||
+          document.webkitExitFullscreen ||
+          document.mozCancelFullScreen ||
+          document.msExitFullscreen;
+        if (exitFs) {
+          try {
+            await exitFs.call(document);
+          } catch (_) {}
+        }
+      }
+    }
+
+    applyReaderSettingsToDOM();
+    if (isComicBookActive() && state.currentComicPages.length > 0) {
+      scheduleComicSvgRefresh();
+    }
+    if (!options.silent) {
+      showToast(next ? '⛶ 已進入全螢幕閱讀（按右上角按鈕或 Esc 退出）' : '已退出全螢幕閱讀');
+    }
+  }
+
+  function toggleReaderFullscreen() {
+    setReaderFullscreen(!state.readerFullscreen);
   }
 
   function setEinkMode(newMode) {
@@ -4767,11 +4928,13 @@
   function applyReaderSettingsToDOM() {
     const s = state.settings;
     document.body.setAttribute('data-theme', s.theme || 'sepia');
+    document.body.classList.toggle('reader-fullscreen', Boolean(state.readerFullscreen));
 
     const root = document.documentElement;
     root.style.setProperty('--reader-font-size', `${s.fontSize || 19}px`);
     root.style.setProperty('--reader-line-height', `${s.lineHeight || 1.85}`);
     root.style.setProperty('--reader-max-width', `${s.maxWidth || 760}px`);
+    root.style.setProperty('--eink-bottom-safe', `${getEffectiveBottomSafePx()}px`);
 
     const fontMap = {
       serif: "var(--font-serif)",
@@ -5133,8 +5296,18 @@
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
       if (e.key === 'Escape') {
+        if (state.readerFullscreen) {
+          setReaderFullscreen(false);
+          return;
+        }
         closeDrawer();
         document.getElementById('reader-settings-popover').classList.remove('open');
+        return;
+      }
+
+      if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        toggleReaderFullscreen();
         return;
       }
 
@@ -5275,6 +5448,7 @@
 
       const scrollY = window.scrollY || window.pageYOffset;
       const viewportHeight = window.innerHeight;
+      const usableViewport = Math.max(240, viewportHeight - getEffectiveBottomSafePx());
       const totalHeight = document.documentElement.scrollHeight;
       const maxScroll = totalHeight - viewportHeight;
 
@@ -5290,8 +5464,8 @@
           showToast('已是全書最後一章');
         }
       } else {
-        // Page down by viewport ratio (larger step & instant jump on E-Ink to avoid ghosting)
-        const step = Math.max(160, Math.floor(viewportHeight * overlapRatio));
+        // Page down by usable viewport ratio (avoids text sitting under EInkBro bottom toolbar)
+        const step = Math.max(160, Math.floor(usableViewport * overlapRatio));
         const target = Math.min(maxScroll, scrollY + step);
         window.scrollTo({ top: target, behavior: scrollBehavior });
       }
@@ -5319,6 +5493,7 @@
 
       const scrollY = window.scrollY || window.pageYOffset;
       const viewportHeight = window.innerHeight;
+      const usableViewport = Math.max(240, viewportHeight - getEffectiveBottomSafePx());
 
       // If already at or very near top (within 40px), transition to previous chapter
       if (scrollY <= 40) {
@@ -5330,8 +5505,8 @@
           showToast('已是第一章頂部');
         }
       } else {
-        // Page up by viewport ratio
-        const step = Math.max(160, Math.floor(viewportHeight * overlapRatio));
+        // Page up by usable viewport ratio
+        const step = Math.max(160, Math.floor(usableViewport * overlapRatio));
         const target = Math.max(0, scrollY - step);
         window.scrollTo({ top: target, behavior: scrollBehavior });
       }
@@ -5901,6 +6076,42 @@
         setEinkMode(btn.dataset.einkOpt);
       });
     });
+
+    document.querySelectorAll('[data-bottom-safe-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setBottomSafePx(btn.dataset.bottomSafeOpt);
+      });
+    });
+
+    const readerFsBtn = document.getElementById('reader-fullscreen-btn');
+    if (readerFsBtn) {
+      readerFsBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleReaderFullscreen();
+      });
+    }
+
+    const fsHudExitBtn = document.getElementById('fullscreen-hud-exit-btn');
+    if (fsHudExitBtn) {
+      fsHudExitBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setReaderFullscreen(false);
+      });
+    }
+
+    const syncNativeFsExit = () => {
+      const isNativeFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+      if (!isNativeFs && state.nativeFullscreenEntered && state.readerFullscreen) {
+        state.nativeFullscreenEntered = false;
+        state.readerFullscreen = false;
+        applyReaderSettingsToDOM();
+        if (isComicBookActive() && state.currentComicPages.length > 0) {
+          scheduleComicSvgRefresh();
+        }
+      }
+    };
+    document.addEventListener('fullscreenchange', syncNativeFsExit);
+    document.addEventListener('webkitfullscreenchange', syncNativeFsExit);
 
     const stylusOnlyCb = document.getElementById('eink-stylus-only-checkbox');
     if (stylusOnlyCb) {

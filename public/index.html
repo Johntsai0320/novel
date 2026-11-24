@@ -378,6 +378,15 @@
           >
             Aa 設定
           </button>
+
+          <button
+            type="button"
+            id="reader-fullscreen-btn"
+            class="btn"
+            title="切換全螢幕閱讀（隱藏上方工具列與標題，最大化漫畫與閱讀版面）"
+          >
+            <span id="reader-fullscreen-text">⛶ <span class="hide-on-mobile">全螢幕</span></span>
+          </button>
         </div>
       </div>
     </header>
@@ -590,6 +599,18 @@
           <button type="button" class="segmented-btn" data-eink-opt="off" title="停用電子紙最佳化">關閉</button>
         </div>
 
+        <div class="setting-label">
+          <span>📐 底部防遮擋留白 (EInkBro 避讓)</span>
+          <span id="bottom-safe-label" style="font-size: 0.74rem; color: var(--accent);">自動</span>
+        </div>
+        <div class="segmented-group" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 0.65rem;">
+          <button type="button" class="segmented-btn active" data-bottom-safe-opt="auto" title="墨水屏與觸控平板自動避開 EInkBro 底部工具列">自動</button>
+          <button type="button" class="segmented-btn" data-bottom-safe-opt="0">關閉</button>
+          <button type="button" class="segmented-btn" data-bottom-safe-opt="64">64px</button>
+          <button type="button" class="segmented-btn" data-bottom-safe-opt="96">96px</button>
+          <button type="button" class="segmented-btn" data-bottom-safe-opt="128">128px</button>
+        </div>
+
         <label style="display: flex; align-items: flex-start; gap: 0.45rem; font-size: 0.76rem; color: var(--text-primary); margin-bottom: 0.7rem; cursor: pointer;">
           <input type="checkbox" id="eink-stylus-only-checkbox" style="margin-top: 0.2rem;" />
           <span>✍️ <strong>BOOX 電磁筆防誤觸</strong>：手寫時僅限感壓筆繪圖，手指維持滑動捲頁（支援筆尾/側鍵橡皮擦）</span>
@@ -622,6 +643,12 @@
         </div>
       </div>
     </aside>
+
+    <!-- Floating Immersive Fullscreen Exit & Status HUD -->
+    <div id="fullscreen-floating-hud" class="fullscreen-floating-hud" aria-label="全螢幕閱讀控制列">
+      <span id="fullscreen-hud-info" class="fullscreen-hud-info"></span>
+      <button type="button" id="fullscreen-hud-exit-btn" class="btn fullscreen-hud-exit-btn" title="退出全螢幕並恢復上方工具列 (Esc)">✕ 退出全螢幕</button>
+    </div>
 
     <!-- Main Chapter Reading Area -->
     <article id="reader-canvas" class="reader-canvas-wrapper">
