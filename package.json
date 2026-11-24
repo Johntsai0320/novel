@@ -31,6 +31,7 @@
     "express": "^5.1.0",
     "iconv-lite": "^0.6.3",
     "jszip": "^3.10.1",
-    "opencc-js": "^1.0.5"
+    "opencc-js": "^1.0.5",
+    "pdf-parse": "1.1.1"
   }
 }

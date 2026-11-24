@@ -1184,15 +1184,108 @@ function reflowPdfText(pagesOrText, options = {}) {
   };
 }
 
+function normalizePdfUnicodeText(str) {
+  if (!str || typeof str !== 'string') return '';
+  return str.replace(/[\u2E80-\u2FDF\uF900-\uFAFF]/g, (ch) => ch.normalize('NFKC'));
+}
+
+function isGarbledPdfText(text) {
+  if (!text || typeof text !== 'string') return true;
+  const nonWs = text.replace(/\s+/g, '');
+  if (nonWs.length === 0) return true;
+
+  let controlOrPua = 0;
+  let weirdOrExotic = 0;
+  let readable = 0;
+  let cjkCount = 0;
+  let kanaCount = 0;
+  let commonCjkCount = 0;
+
+  const commonCjkSet = new Set(
+    '的一是不了人在有我他這中大來上國個到說們為子和你地出道也時年得就那要下以生會自著去之過家學對可她裡后小心嗎啊呢吧，。、：；「」『』！？（）'
+  );
+
+  for (let i = 0; i < nonWs.length; i++) {
+    const code = nonWs.charCodeAt(i);
+    const ch = nonWs[i];
+
+    if (
+      code <= 0x1f ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0xfffd ||
+      (code >= 0xe000 && code <= 0xf8ff) ||
+      code >= 0xfff0
+    ) {
+      controlOrPua++;
+      continue;
+    }
+
+    if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) {
+      cjkCount++;
+      readable++;
+      if (commonCjkSet.has(ch)) commonCjkCount++;
+      continue;
+    }
+
+    if (code >= 0x3040 && code <= 0x30ff) {
+      kanaCount++;
+      readable++;
+      continue;
+    }
+
+    if (
+      (code >= 0x3000 && code <= 0x303f) ||
+      (code >= 0xac00 && code <= 0xd7af) ||
+      (code >= 0xff01 && code <= 0xff5e) ||
+      (code >= 0x20 && code <= 0x7e) ||
+      '—–…·•「」『』《》〈〉【】〔〕、。，．！？：；（）°±×÷©®§€£¥'.includes(ch)
+    ) {
+      readable++;
+      if (commonCjkSet.has(ch)) commonCjkCount++;
+      continue;
+    }
+
+    weirdOrExotic++;
+  }
+
+  const total = nonWs.length;
+  if (controlOrPua / total > 0.05) return true;
+  if (weirdOrExotic / total > 0.16) return true;
+  if (readable / total < 0.58) return true;
+  if (cjkCount >= 80 && kanaCount < 10 && commonCjkCount / cjkCount < 0.025) {
+    return true;
+  }
+  return false;
+}
+
 /**
- * Parse a ToUnicode CMap stream (beginbfchar / beginbfrange) into a Map<code, unicodeStr>
+ * Parse a ToUnicode CMap stream (codespacerange / beginbfchar / beginbfrange) into a Map<code, unicodeStr>
  */
 function parseToUnicodeCMap(cmapStr) {
   const map = new Map();
+  const codespaces = [];
   let keyByteLen = 2;
+  let saw1Byte = false;
+  let saw2Byte = false;
+
+  const csRegex = /begincodespacerange([\s\S]*?)endcodespacerange/g;
+  let match;
+  while ((match = csRegex.exec(cmapStr)) !== null) {
+    const pairRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+    let pair;
+    while ((pair = pairRegex.exec(match[1])) !== null) {
+      const lenBytes = Math.max(1, Math.ceil(pair[1].length / 2));
+      const start = parseInt(pair[1], 16);
+      const end = parseInt(pair[2], 16);
+      if (!Number.isNaN(start) && !Number.isNaN(end)) {
+        codespaces.push({ lenBytes, start, end });
+        if (lenBytes === 1) saw1Byte = true;
+        else if (lenBytes === 2) saw2Byte = true;
+      }
+    }
+  }
 
   const bfcharRegex = /beginbfchar([\s\S]*?)endbfchar/g;
-  let match;
   while ((match = bfcharRegex.exec(cmapStr)) !== null) {
     const body = match[1];
     const pairRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
@@ -1200,7 +1293,8 @@ function parseToUnicodeCMap(cmapStr) {
     while ((pair = pairRegex.exec(body)) !== null) {
       const srcHex = pair[1];
       const dstHex = pair[2];
-      if (srcHex.length === 2) keyByteLen = 1;
+      if (srcHex.length <= 2) saw1Byte = true;
+      else saw2Byte = true;
       const code = parseInt(srcHex, 16);
       const unicodeStr = decodeHexUtf16Be(dstHex);
       if (!Number.isNaN(code) && unicodeStr) {
@@ -1217,13 +1311,33 @@ function parseToUnicodeCMap(cmapStr) {
     while ((r = rangeDirectRegex.exec(body)) !== null) {
       const startCode = parseInt(r[1], 16);
       const endCode = parseInt(r[2], 16);
-      const dstStartHex = r[3];
-      if (r[1].length === 2) keyByteLen = 1;
-      const baseCodePoint = parseInt(dstStartHex, 16);
-      if (!Number.isNaN(startCode) && !Number.isNaN(endCode) && !Number.isNaN(baseCodePoint)) {
+      const dstHex = r[3].replace(/\s+/g, '');
+      if (r[1].length <= 2) saw1Byte = true;
+      else saw2Byte = true;
+      if (!Number.isNaN(startCode) && !Number.isNaN(endCode) && dstHex) {
         const limit = Math.min(endCode, startCode + 4096);
-        for (let c = startCode; c <= limit; c++) {
-          map.set(c, String.fromCodePoint(baseCodePoint + (c - startCode)));
+        if (dstHex.length <= 4) {
+          const baseCodePoint = parseInt(dstHex, 16);
+          if (!Number.isNaN(baseCodePoint)) {
+            for (let c = startCode; c <= limit; c++) {
+              const cp = baseCodePoint + (c - startCode);
+              if (cp >= 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff)) {
+                map.set(c, String.fromCodePoint(cp));
+              }
+            }
+          }
+        } else {
+          const prefixHex = dstHex.slice(0, dstHex.length - 4);
+          const tailVal = parseInt(dstHex.slice(-4), 16);
+          if (!Number.isNaN(tailVal)) {
+            for (let c = startCode; c <= limit; c++) {
+              const tailHex = ((tailVal + (c - startCode)) & 0xffff)
+                .toString(16)
+                .padStart(4, '0');
+              const decoded = decodeHexUtf16Be(prefixHex + tailHex);
+              if (decoded) map.set(c, decoded);
+            }
+          }
         }
       }
     }
@@ -1231,21 +1345,28 @@ function parseToUnicodeCMap(cmapStr) {
     while ((r = rangeArrayRegex.exec(body)) !== null) {
       const startCode = parseInt(r[1], 16);
       const endCode = parseInt(r[2], 16);
+      if (r[1].length <= 2) saw1Byte = true;
+      else saw2Byte = true;
       const arrBody = r[3];
       const items = arrBody.match(/<([0-9A-Fa-f]+)>/g) || [];
       for (let i = 0; i < items.length && startCode + i <= endCode; i++) {
         const hex = items[i].slice(1, -1);
-        map.set(startCode + i, decodeHexUtf16Be(hex));
+        const decoded = decodeHexUtf16Be(hex);
+        if (decoded) map.set(startCode + i, decoded);
       }
     }
   }
 
-  return { map, keyByteLen };
+  if (saw2Byte) keyByteLen = 2;
+  else if (saw1Byte) keyByteLen = 1;
+
+  return { map, keyByteLen, codespaces };
 }
 
 function decodeHexUtf16Be(hex) {
   if (!hex) return '';
   const clean = hex.replace(/\s+/g, '');
+  if (!clean) return '';
   if (clean.length === 2) {
     return String.fromCharCode(parseInt(clean, 16));
   }
@@ -1259,13 +1380,82 @@ function decodeHexUtf16Be(hex) {
   return out;
 }
 
-function decodeHexWithCMap(hexStr, cmapObj) {
+function decodeBufferWithPdfEncoding(buf, encodingName) {
+  if (!buf || buf.length === 0) return '';
+  const enc = (encodingName || '').toLowerCase();
+  try {
+    if (enc.includes('gbk') || enc.includes('gb2312') || enc.includes('gb18030') || enc.includes('euc-h')) {
+      return iconv.decode(buf, 'gb18030');
+    }
+    if (enc.includes('b5') || enc.includes('big5') || enc.includes('cns-')) {
+      if (enc.includes('utf16') || enc.includes('ucs2')) {
+        return decodeHexUtf16Be(buf.toString('hex'));
+      }
+      return iconv.decode(buf, 'big5');
+    }
+    if (enc.includes('utf16') || enc.includes('ucs2')) {
+      return decodeHexUtf16Be(buf.toString('hex'));
+    }
+    if (enc.includes('winansi')) {
+      return iconv.decode(buf, 'win1252');
+    }
+    if (enc.includes('macroman')) {
+      return iconv.decode(buf, 'macintosh');
+    }
+  } catch (_) {}
+  return '';
+}
+
+function isLikelyAsciiHex(cleanHex) {
+  if (!cleanHex || cleanHex.length < 4 || cleanHex.length % 2 !== 0) return false;
+  for (let i = 0; i < cleanHex.length; i += 2) {
+    const b = parseInt(cleanHex.slice(i, i + 2), 16);
+    if (b === 0x09 || b === 0x0a || b === 0x0d) continue;
+    if (b < 0x20 || b > 0x7e) return false;
+  }
+  return true;
+}
+
+function decodeHexWithCMap(hexStr, cmapObj, encodingName = '') {
   const clean = hexStr.replace(/\s+/g, '');
   if (!clean) return '';
-  if (clean.toUpperCase().startsWith('FEFF')) {
+  if (clean.toUpperCase().startsWith('FEFF') && clean.length >= 8) {
     return decodeHexUtf16Be(clean.slice(4));
   }
   if (cmapObj && cmapObj.map && cmapObj.map.size > 0) {
+    if (Array.isArray(cmapObj.codespaces) && cmapObj.codespaces.length > 0) {
+      let out = '';
+      let i = 0;
+      while (i < clean.length) {
+        let matched = false;
+        for (const cs of cmapObj.codespaces) {
+          const hexLen = cs.lenBytes * 2;
+          if (i + hexLen <= clean.length) {
+            const slice = clean.slice(i, i + hexLen);
+            const code = parseInt(slice, 16);
+            if (code >= cs.start && code <= cs.end && cmapObj.map.has(code)) {
+              out += cmapObj.map.get(code);
+              i += hexLen;
+              matched = true;
+              break;
+            }
+          }
+        }
+        if (!matched) {
+          const step = cmapObj.keyByteLen === 1 ? 2 : 4;
+          const slice = clean.slice(i, i + step);
+          const code = parseInt(slice, 16);
+          if (cmapObj.map.has(code)) {
+            out += cmapObj.map.get(code);
+          } else if (step === 2 && code >= 0x20 && code <= 0x7e) {
+            out += String.fromCharCode(code);
+          }
+          i += step;
+        }
+      }
+      return out;
+    }
+
     const step = cmapObj.keyByteLen === 1 ? 2 : 4;
     let out = '';
     for (let i = 0; i < clean.length; i += step) {
@@ -1278,79 +1468,198 @@ function decodeHexWithCMap(hexStr, cmapObj) {
         const lo = parseInt(slice.slice(2, 4), 16);
         if (cmapObj.map.has(hi) && cmapObj.map.has(lo)) {
           out += cmapObj.map.get(hi) + cmapObj.map.get(lo);
-        } else if (code >= 0x20) {
-          out += String.fromCharCode(code);
+        } else if (hi === 0x00 && lo >= 0x20 && lo <= 0x7e) {
+          out += String.fromCharCode(lo);
         }
+      } else if (step === 2 && code >= 0x20 && code <= 0x7e) {
+        out += String.fromCharCode(code);
       }
     }
     return out;
   }
+
+  if (encodingName) {
+    const encDecoded = decodeBufferWithPdfEncoding(
+      Buffer.from(clean.length % 2 === 0 ? clean : '0' + clean, 'hex'),
+      encodingName
+    );
+    if (encDecoded) return encDecoded;
+  }
+
+  if (isLikelyAsciiHex(clean)) {
+    return Buffer.from(clean, 'hex').toString('ascii');
+  }
   if (clean.length % 4 === 0) {
     return decodeHexUtf16Be(clean);
   }
-  return Buffer.from(clean, 'hex').toString('utf8');
+  return Buffer.from(clean.length % 2 === 0 ? clean : '0' + clean, 'hex').toString('utf8');
 }
 
-function unescapePdfLiteral(str, cmapObj) {
+function unescapePdfLiteral(str, cmapObj, encodingName = '') {
   const raw = str
+    .replace(/\\\r?\n/g, '')
     .replace(/\\n/g, '\n')
     .replace(/\\r/g, '\r')
     .replace(/\\t/g, '\t')
+    .replace(/\\b/g, '\b')
+    .replace(/\\f/g, '\f')
     .replace(/\\\(/g, '(')
     .replace(/\\\)/g, ')')
     .replace(/\\\\/g, '\\')
     .replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
 
-  if (cmapObj && cmapObj.map && cmapObj.map.size > 0 && cmapObj.keyByteLen === 1) {
-    let mapped = '';
-    for (let i = 0; i < raw.length; i++) {
-      const code = raw.charCodeAt(i);
-      mapped += cmapObj.map.get(code) || raw[i];
+  if (raw.length >= 2 && raw.charCodeAt(0) === 0xfe && raw.charCodeAt(1) === 0xff) {
+    let out = '';
+    for (let i = 2; i + 1 < raw.length; i += 2) {
+      out += String.fromCharCode((raw.charCodeAt(i) << 8) | raw.charCodeAt(i + 1));
     }
-    return mapped;
+    return out;
   }
+
+  if (cmapObj && cmapObj.map && cmapObj.map.size > 0) {
+    if (cmapObj.keyByteLen === 2 && raw.length >= 2 && raw.length % 2 === 0) {
+      let mapped = '';
+      let hits = 0;
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        const code = (raw.charCodeAt(i) << 8) | raw.charCodeAt(i + 1);
+        if (cmapObj.map.has(code)) {
+          mapped += cmapObj.map.get(code);
+          hits++;
+        } else if (raw.charCodeAt(i) === 0 && raw.charCodeAt(i + 1) >= 0x20 && raw.charCodeAt(i + 1) <= 0x7e) {
+          mapped += raw[i + 1];
+        }
+      }
+      if (hits > 0 || mapped.length > 0) return mapped;
+    } else if (cmapObj.keyByteLen === 1) {
+      let mapped = '';
+      for (let i = 0; i < raw.length; i++) {
+        const code = raw.charCodeAt(i);
+        if (cmapObj.map.has(code)) {
+          mapped += cmapObj.map.get(code);
+        } else if (code >= 0x20 && code <= 0x7e) {
+          mapped += raw[i];
+        }
+      }
+      return mapped;
+    }
+  }
+
+  if (encodingName) {
+    const encDecoded = decodeBufferWithPdfEncoding(Buffer.from(raw, 'latin1'), encodingName);
+    if (encDecoded) return encDecoded;
+  }
+
   return raw;
 }
 
-function inflatePdfStream(rawStreamLatin1) {
+function unfilterPngPredictor(buf, columns, colors = 1, bpc = 8) {
+  const bpp = Math.max(1, Math.ceil((colors * bpc) / 8));
+  const rowLen = Math.max(1, Math.ceil((columns * colors * bpc) / 8));
+  const stride = rowLen + 1;
+  if (columns <= 0 || buf.length < stride) return buf;
+
+  const rowCount = Math.floor(buf.length / stride);
+  const out = Buffer.alloc(rowCount * rowLen);
+
+  for (let r = 0; r < rowCount; r++) {
+    const srcOff = r * stride;
+    const dstOff = r * rowLen;
+    const filterType = buf[srcOff];
+
+    for (let c = 0; c < rowLen; c++) {
+      const x = buf[srcOff + 1 + c];
+      const a = c >= bpp ? out[dstOff + c - bpp] : 0;
+      const b = r > 0 ? out[(r - 1) * rowLen + c] : 0;
+      const d = r > 0 && c >= bpp ? out[(r - 1) * rowLen + c - bpp] : 0;
+
+      let val = x;
+      if (filterType === 1) val = (x + a) & 0xff;
+      else if (filterType === 2) val = (x + b) & 0xff;
+      else if (filterType === 3) val = (x + ((a + b) >> 1)) & 0xff;
+      else if (filterType === 4) {
+        const p = a + b - d;
+        const pa = Math.abs(p - a);
+        const pb = Math.abs(p - b);
+        const pc = Math.abs(p - d);
+        const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : d;
+        val = (x + pr) & 0xff;
+      }
+      out[dstOff + c] = val;
+    }
+  }
+  return out;
+}
+
+function inflatePdfStream(rawStreamLatin1, dictStr = '') {
   const buf = Buffer.from(rawStreamLatin1, 'latin1');
-  try {
-    return zlib.inflateSync(buf).toString('latin1');
-  } catch (_) {
+  let outBuf = buf;
+
+  if (!dictStr || /\/FlateDecode\b/i.test(dictStr) || !/\/Filter\b/i.test(dictStr)) {
     try {
-      return zlib.inflateRawSync(buf.subarray(2)).toString('latin1');
-    } catch (_2) {
+      outBuf = zlib.inflateSync(buf);
+    } catch (_) {
       try {
-        return zlib.inflateRawSync(buf).toString('latin1');
-      } catch (_3) {
-        return rawStreamLatin1;
+        outBuf = zlib.inflateRawSync(buf.subarray(2));
+      } catch (_2) {
+        try {
+          outBuf = zlib.inflateRawSync(buf);
+        } catch (_3) {
+          outBuf = buf;
+        }
       }
     }
   }
+
+  if (dictStr) {
+    const predMatch = dictStr.match(/\/Predictor\s+(\d+)/);
+    const predictor = predMatch ? parseInt(predMatch[1], 10) : 1;
+    if (predictor >= 10 && outBuf !== buf) {
+      const colsMatch = dictStr.match(/\/Columns\s+(\d+)/);
+      const colorsMatch = dictStr.match(/\/Colors\s+(\d+)/);
+      const bpcMatch = dictStr.match(/\/BitsPerComponent\s+(\d+)/);
+      const columns = colsMatch ? parseInt(colsMatch[1], 10) : 1;
+      const colors = colorsMatch ? parseInt(colorsMatch[1], 10) : 1;
+      const bpc = bpcMatch ? parseInt(bpcMatch[1], 10) : 8;
+      outBuf = unfilterPngPredictor(outBuf, columns, colors, bpc);
+    }
+  }
+
+  return outBuf.toString('latin1');
 }
 
 /**
- * Built-in zero-dependency PDF text, CMap & page layout extractor (using Node native zlib)
- * Supports ToUnicode CMaps (beginbfchar / beginbfrange), per-font CMap switching,
- * Tm text matrix / Td / TD / T* line positioning, and TJ / Tj text arrays.
+ * Built-in zero-dependency PDF text, CMap, /ObjStm & page layout extractor (using Node native zlib)
+ * Supports PDF 1.5+ ObjStm, PNG predictors, per-page Resources, ToUnicode CMaps (codespace/bfchar/bfrange),
+ * 1-byte and 2-byte literal strings, Encoding fallbacks, Tm/Td/TD/T* positioning, and TJ/Tj text arrays.
  */
 function extractPdfBuiltin(buffer) {
   const rawLatin1 = buffer.toString('latin1');
   const pageMatches = rawLatin1.match(/\/Type\s*\/Page\b(?!s)/g);
   const numpages = pageMatches ? pageMatches.length : 1;
 
+  const objectsById = new Map();
   const cmapsByObjId = new Map();
   const fontObjToCmapObj = new Map();
+  const fontObjToDescendant = new Map();
+  const fontObjToEncoding = new Map();
   const resourceNameToFontObj = new Map();
-  const globalCMap = new Map();
-  let globalKeyByteLen = 2;
-  const contentStreams = [];
+  const globalCMap1Map = new Map();
+  const globalCMap2Map = new Map();
 
-  const scanDictMappings = (dictStr, objId = null) => {
+  const registerFontAndResourceDict = (dictStr, objId = null) => {
+    if (!dictStr) return;
     if (objId !== null) {
       const toUniMatch = dictStr.match(/\/ToUnicode\s+(\d+)\s+\d+\s+R/);
       if (toUniMatch) {
         fontObjToCmapObj.set(objId, parseInt(toUniMatch[1], 10));
+      }
+      const descMatch = dictStr.match(/\/DescendantFonts\s*\[\s*(\d+)\s+\d+\s+R/);
+      if (descMatch) {
+        fontObjToDescendant.set(objId, parseInt(descMatch[1], 10));
+      }
+      const encMatch = dictStr.match(/\/Encoding\s*\/([A-Za-z0-9_.+-]+)/);
+      if (encMatch) {
+        fontObjToEncoding.set(objId, encMatch[1]);
       }
     }
     const fontDictRegex = /\/([A-Za-z0-9_.+-]+)\s+(\d+)\s+\d+\s+R/g;
@@ -1367,9 +1676,21 @@ function extractPdfBuiltin(buffer) {
           'CropBox',
           'ToUnicode',
           'FontDescriptor',
+          'FontFile',
+          'FontFile2',
+          'FontFile3',
           'BaseFont',
           'Encoding',
-          'DescendantFonts'
+          'DescendantFonts',
+          'Kids',
+          'Pages',
+          'Outlines',
+          'StructTreeRoot',
+          'Metadata',
+          'ExtGState',
+          'ColorSpace',
+          'Pattern',
+          'Shading'
         ].includes(key)
       ) {
         resourceNameToFontObj.set(key, parseInt(fdMatch[2], 10));
@@ -1377,74 +1698,219 @@ function extractPdfBuiltin(buffer) {
     }
   };
 
+  // Pass 1: Index all top-level PDF objects and unpack /ObjStm streams
   const objRegex = /(\d+)\s+\d+\s+obj\b([\s\S]*?)endobj/g;
   let objMatch;
   while ((objMatch = objRegex.exec(rawLatin1)) !== null) {
     const objId = parseInt(objMatch[1], 10);
     const objBody = objMatch[2];
-    scanDictMappings(objBody, objId);
+    const streamMatch = objBody.match(/^([\s\S]*?)stream(?:\r\n|\n)([\s\S]*?)endstream/);
 
-    const streamMatch = objBody.match(/stream(?:\r\n|\n)([\s\S]*?)endstream/);
     if (streamMatch) {
-      const contentStr = inflatePdfStream(streamMatch[1]);
-      if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
-        const parsedCmap = parseToUnicodeCMap(contentStr);
-        cmapsByObjId.set(objId, parsedCmap);
-        if (parsedCmap.keyByteLen === 1) globalKeyByteLen = 1;
-        for (const [k, v] of parsedCmap.map.entries()) {
-          globalCMap.set(k, v);
+      const dictPart = streamMatch[1];
+      const decompressed = inflatePdfStream(streamMatch[2], dictPart);
+      objectsById.set(objId, { dict: dictPart, stream: decompressed });
+      registerFontAndResourceDict(dictPart, objId);
+
+      if (/\/Type\s*\/ObjStm\b/.test(dictPart)) {
+        const firstMatch = dictPart.match(/\/First\s+(\d+)/);
+        const firstOffset = firstMatch ? parseInt(firstMatch[1], 10) : 0;
+        if (firstOffset > 0 && firstOffset < decompressed.length) {
+          const headerStr = decompressed.slice(0, firstOffset).trim();
+          const bodyStr = decompressed.slice(firstOffset);
+          const nums = headerStr
+            .split(/\s+/)
+            .map((n) => parseInt(n, 10))
+            .filter((n) => !Number.isNaN(n));
+          const entries = [];
+          for (let i = 0; i + 1 < nums.length; i += 2) {
+            entries.push({ innerId: nums[i], offset: nums[i + 1] });
+          }
+          entries.sort((a, b) => a.offset - b.offset);
+          for (let i = 0; i < entries.length; i++) {
+            const start = entries[i].offset;
+            const end = i + 1 < entries.length ? entries[i + 1].offset : bodyStr.length;
+            const innerBody = bodyStr.slice(start, end);
+            objectsById.set(entries[i].innerId, { dict: innerBody, stream: null });
+            registerFontAndResourceDict(innerBody, entries[i].innerId);
+          }
         }
-      } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
-        contentStreams.push(contentStr);
-      } else if (contentStr.includes('/ToUnicode') || contentStr.includes('/Font')) {
-        scanDictMappings(contentStr, null);
+      } else if (decompressed.includes('beginbfchar') || decompressed.includes('beginbfrange')) {
+        const parsedCmap = parseToUnicodeCMap(decompressed);
+        cmapsByObjId.set(objId, parsedCmap);
+        const targetGlobal = parsedCmap.keyByteLen === 1 ? globalCMap1Map : globalCMap2Map;
+        for (const [k, v] of parsedCmap.map.entries()) {
+          if (!targetGlobal.has(k)) targetGlobal.set(k, v);
+        }
+      }
+    } else {
+      objectsById.set(objId, { dict: objBody, stream: null });
+      registerFontAndResourceDict(objBody, objId);
+    }
+  }
+
+  for (const [fontId, descId] of fontObjToDescendant.entries()) {
+    if (!fontObjToCmapObj.has(fontId) && fontObjToCmapObj.has(descId)) {
+      fontObjToCmapObj.set(fontId, fontObjToCmapObj.get(descId));
+    }
+    if (!fontObjToEncoding.has(fontId) && fontObjToEncoding.has(descId)) {
+      fontObjToEncoding.set(fontId, fontObjToEncoding.get(descId));
+    }
+  }
+
+  const globalCmap2Obj = { map: globalCMap2Map, keyByteLen: 2, codespaces: [] };
+  const globalCmap1Obj = { map: globalCMap1Map, keyByteLen: 1, codespaces: [] };
+
+  const extractFontMapFromDict = (dictStr, visited = new Set()) => {
+    const fontMap = new Map();
+    if (!dictStr) return fontMap;
+
+    const inlineFontBlock = dictStr.match(/\/Font\s*<<([\s\S]*?)>>/);
+    if (inlineFontBlock) {
+      const refRe = /\/([A-Za-z0-9_.+-]+)\s+(\d+)\s+\d+\s+R/g;
+      let m;
+      while ((m = refRe.exec(inlineFontBlock[1])) !== null) {
+        fontMap.set(m[1], parseInt(m[2], 10));
+      }
+    }
+    const fontRef = dictStr.match(/\/Font\s+(\d+)\s+\d+\s+R/);
+    if (fontRef) {
+      const fObjId = parseInt(fontRef[1], 10);
+      if (!visited.has(fObjId) && objectsById.has(fObjId)) {
+        visited.add(fObjId);
+        const fDict = objectsById.get(fObjId).dict;
+        const refRe = /\/([A-Za-z0-9_.+-]+)\s+(\d+)\s+\d+\s+R/g;
+        let m;
+        while ((m = refRe.exec(fDict)) !== null) {
+          fontMap.set(m[1], parseInt(m[2], 10));
+        }
+      }
+    }
+    const resRef = dictStr.match(/\/Resources\s+(\d+)\s+\d+\s+R/);
+    if (resRef) {
+      const rObjId = parseInt(resRef[1], 10);
+      if (!visited.has(rObjId) && objectsById.has(rObjId)) {
+        visited.add(rObjId);
+        const subMap = extractFontMapFromDict(objectsById.get(rObjId).dict, visited);
+        for (const [k, v] of subMap.entries()) {
+          if (!fontMap.has(k)) fontMap.set(k, v);
+        }
+      }
+    }
+    const parentRef = dictStr.match(/\/Parent\s+(\d+)\s+\d+\s+R/);
+    if (parentRef) {
+      const pObjId = parseInt(parentRef[1], 10);
+      if (!visited.has(pObjId) && objectsById.has(pObjId)) {
+        visited.add(pObjId);
+        const parentMap = extractFontMapFromDict(objectsById.get(pObjId).dict, visited);
+        for (const [k, v] of parentMap.entries()) {
+          if (!fontMap.has(k)) fontMap.set(k, v);
+        }
+      }
+    }
+    return fontMap;
+  };
+
+  // Pass 2: Resolve per-page /Contents streams paired with exact page /Font maps
+  const pageJobs = [];
+  const consumedStreamIds = new Set();
+
+  for (const [, obj] of objectsById.entries()) {
+    if (!/\/Type\s*\/Page\b(?!s)/.test(obj.dict)) continue;
+
+    const pageFontMap = extractFontMapFromDict(obj.dict);
+    const contentIds = [];
+    const arrMatch = obj.dict.match(/\/Contents\s*\[([\s\S]*?)\]/);
+    if (arrMatch) {
+      const rRe = /(\d+)\s+\d+\s+R/g;
+      let rm;
+      while ((rm = rRe.exec(arrMatch[1])) !== null) {
+        contentIds.push(parseInt(rm[1], 10));
+      }
+    } else {
+      const singleMatch = obj.dict.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
+      if (singleMatch) {
+        contentIds.push(parseInt(singleMatch[1], 10));
+      }
+    }
+
+    const streams = [];
+    for (const cid of contentIds) {
+      consumedStreamIds.add(cid);
+      const cObj = objectsById.get(cid);
+      if (
+        cObj &&
+        cObj.stream &&
+        (cObj.stream.includes('BT') || cObj.stream.includes('Tj') || cObj.stream.includes('TJ'))
+      ) {
+        streams.push(cObj.stream);
+      }
+    }
+    if (streams.length > 0) {
+      pageJobs.push({ contentStr: streams.join('\n'), fontMap: pageFontMap });
+    }
+  }
+
+  if (pageJobs.length === 0) {
+    for (const [id, obj] of objectsById.entries()) {
+      if (consumedStreamIds.has(id)) continue;
+      if (obj.stream && obj.stream.includes('BT') && obj.stream.includes('ET')) {
+        pageJobs.push({ contentStr: obj.stream, fontMap: resourceNameToFontObj });
       }
     }
   }
 
-  if (contentStreams.length === 0) {
+  if (pageJobs.length === 0) {
     const streamRegex = /stream(?:\r\n|\n)([\s\S]*?)endstream/g;
     let match;
     while ((match = streamRegex.exec(rawLatin1)) !== null) {
       const contentStr = inflatePdfStream(match[1]);
       if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
         const parsedCmap = parseToUnicodeCMap(contentStr);
-        if (parsedCmap.keyByteLen === 1) globalKeyByteLen = 1;
+        const targetGlobal = parsedCmap.keyByteLen === 1 ? globalCMap1Map : globalCMap2Map;
         for (const [k, v] of parsedCmap.map.entries()) {
-          globalCMap.set(k, v);
+          if (!targetGlobal.has(k)) targetGlobal.set(k, v);
         }
       } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
-        contentStreams.push(contentStr);
+        pageJobs.push({ contentStr, fontMap: resourceNameToFontObj });
       }
     }
   }
 
-  const globalCmapObj = { map: globalCMap, keyByteLen: globalKeyByteLen };
+  const resolveActiveFont = (fontName, pageFontMap) => {
+    const fontObjId = pageFontMap.get(fontName) || resourceNameToFontObj.get(fontName) || null;
+    const cmapObjId = fontObjId ? fontObjToCmapObj.get(fontObjId) : null;
+    const encodingName = fontObjId ? fontObjToEncoding.get(fontObjId) || '' : '';
+    if (cmapObjId && cmapsByObjId.has(cmapObjId)) {
+      return { cmapObj: cmapsByObjId.get(cmapObjId), encodingName };
+    }
+    return {
+      cmapObj: globalCMap2Map.size > 0 ? globalCmap2Obj : globalCMap1Map.size > 0 ? globalCmap1Obj : null,
+      encodingName
+    };
+  };
+
   const pages = [];
 
-  for (const contentStr of contentStreams) {
+  for (const job of pageJobs) {
     const pageLines = [];
     let currentLine = '';
-    let activeCmapObj = globalCmapObj;
+    let activeCmapObj = globalCMap2Map.size > 0 ? globalCmap2Obj : globalCMap1Map.size > 0 ? globalCmap1Obj : null;
+    let activeEncoding = '';
     let lastTmY = null;
 
     const btEtRegex = /\bBT\b([\s\S]*?)\bET\b/g;
     let btMatch;
-    while ((btMatch = btEtRegex.exec(contentStr)) !== null) {
+    while ((btMatch = btEtRegex.exec(job.contentStr)) !== null) {
       const block = btMatch[1];
       const tokenRegex =
-        /\/([A-Za-z0-9_.+-]+)\s+[-+]?\d+(?:\.\d+)?\s+Tf\b|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|')|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|\bT\*/g;
+        /\/([A-Za-z0-9_.+-]+)\s+[-+]?\d+(?:\.\d+)?\s+Tf\b|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|'|")|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|\bT\*/g;
       let tok;
       while ((tok = tokenRegex.exec(block)) !== null) {
         if (tok[1] !== undefined) {
-          const fontName = tok[1];
-          const fontObjId = resourceNameToFontObj.get(fontName);
-          const cmapObjId = fontObjId ? fontObjToCmapObj.get(fontObjId) : null;
-          if (cmapObjId && cmapsByObjId.has(cmapObjId)) {
-            activeCmapObj = cmapsByObjId.get(cmapObjId);
-          } else {
-            activeCmapObj = globalCmapObj;
-          }
+          const resolved = resolveActiveFont(tok[1], job.fontMap);
+          activeCmapObj = resolved.cmapObj;
+          activeEncoding = resolved.encodingName;
         } else if (tok[7] !== undefined) {
           const tmY = parseFloat(tok[7]);
           if (lastTmY !== null && Math.abs(tmY - lastTmY) > 2 && currentLine.trim()) {
@@ -1458,9 +1924,9 @@ function extractPdfBuiltin(buffer) {
           let sub;
           while ((sub = subRegex.exec(arrStr)) !== null) {
             if (sub[1] !== undefined) {
-              currentLine += decodeHexWithCMap(sub[1], activeCmapObj);
+              currentLine += decodeHexWithCMap(sub[1], activeCmapObj, activeEncoding);
             } else if (sub[2] !== undefined) {
-              currentLine += unescapePdfLiteral(sub[2], activeCmapObj);
+              currentLine += unescapePdfLiteral(sub[2], activeCmapObj, activeEncoding);
             } else if (sub[3] !== undefined) {
               const kern = parseFloat(sub[3]);
               if (kern < -180 && currentLine && !currentLine.endsWith(' ')) {
@@ -1469,9 +1935,9 @@ function extractPdfBuiltin(buffer) {
             }
           }
         } else if (tok[9] !== undefined) {
-          currentLine += decodeHexWithCMap(tok[9], activeCmapObj);
+          currentLine += decodeHexWithCMap(tok[9], activeCmapObj, activeEncoding);
         } else if (tok[10] !== undefined) {
-          currentLine += unescapePdfLiteral(tok[10], activeCmapObj);
+          currentLine += unescapePdfLiteral(tok[10], activeCmapObj, activeEncoding);
         } else if (tok[11] !== undefined && tok[12] !== undefined) {
           const ty = parseFloat(tok[12]);
           if (Math.abs(ty) > 0.1 && currentLine.trim()) {
@@ -1492,7 +1958,7 @@ function extractPdfBuiltin(buffer) {
     }
 
     if (pageLines.length > 0) {
-      pages.push(pageLines.join('\n'));
+      pages.push(normalizePdfUnicodeText(pageLines.join('\n')));
     }
   }
 
@@ -1522,10 +1988,11 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
               let lastY = null;
               let pageText = '';
               for (const item of textContent.items) {
+                const str = normalizePdfUnicodeText(item.str || '');
                 if (lastY === item.transform[5] || lastY === null) {
-                  pageText += item.str;
+                  pageText += str;
                 } else {
-                  pageText += '\n' + item.str;
+                  pageText += '\n' + str;
                 }
                 lastY = item.transform[5];
               }
@@ -1535,20 +2002,35 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
           }
         };
         data = await pdfParse(buffer, options);
+        if (data && typeof data.text === 'string') {
+          data.text = normalizePdfUnicodeText(data.text);
+        }
       } catch (_) {
         data = null;
         pages = [];
       }
     }
 
-    const pdfParseTextLen = (pages.join('') || (data && data.text) || '').replace(/\s+/g, '').length;
-    if (!data || pdfParseTextLen <= 20) {
+    const pdfParseTextRaw = pages.join('\n\n') || (data && data.text) || '';
+    const pdfParseTextLen = pdfParseTextRaw.replace(/\s+/g, '').length;
+    const pdfParseGarbled = pdfParseTextLen > 20 && isGarbledPdfText(pdfParseTextRaw);
+    let garbledFallbackDetected = false;
+
+    if (!data || pdfParseTextLen <= 20 || pdfParseGarbled) {
       const builtinData = extractPdfBuiltin(buffer);
-      if (!data || (builtinData.text || '').replace(/\s+/g, '').length > pdfParseTextLen) {
-        data = builtinData;
+      const builtinText = builtinData.text || '';
+      const builtinLen = builtinText.replace(/\s+/g, '').length;
+      const builtinGarbled = builtinLen > 20 && isGarbledPdfText(builtinText);
+
+      if (!builtinGarbled && (pdfParseGarbled || builtinLen > pdfParseTextLen || !data)) {
+        data = { ...builtinData, info: (data && data.info) || builtinData.info || {} };
         if (Array.isArray(builtinData.pages) && builtinData.pages.length > 0) {
           pages = builtinData.pages;
         }
+      } else if ((pdfParseGarbled && (builtinLen <= 20 || builtinGarbled)) || builtinGarbled) {
+        garbledFallbackDetected = true;
+        pages = [];
+        data = { ...(data || {}), text: '' };
       }
     }
 
@@ -1563,9 +2045,10 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
 
     const rawFullText = pages.length > 0 ? pages.join('\n\n') : (data.text || '').trim();
     const totalChars = rawFullText.replace(/\s+/g, '').length;
+    const textIsGarbled = garbledFallbackDetected || (totalChars > 20 && isGarbledPdfText(rawFullText));
 
-    // If PDF contains extractable text (> 20 chars), apply Smart PDF Reflow
-    if (totalChars > 20) {
+    // If PDF contains clean extractable text (> 20 chars & not garbled), apply Smart PDF Reflow
+    if (totalChars > 20 && !textIsGarbled) {
       const fullReflow = reflowPdfText(pages.length > 0 ? pages : rawFullText, {
         stripHeadersFooters: true,
         mergeBrokenLines: true
@@ -1667,23 +2150,26 @@ async function parsePdfBuffer(buffer, filename = '未命名文件.pdf', bookId =
       };
     }
 
-    // Image/Scanned PDF with no text layer: provide embedded PDF viewer chapter
+    // Image/Scanned or custom-encoded PDF without usable Unicode map: provide embedded PDF viewer chapter
     return {
       title: infoTitle,
       author: infoAuthor,
-      description: '掃描版或純圖片 PDF 書籍（支援原版 PDF 檢視模式）',
+      description: textIsGarbled
+        ? '此 PDF 未內嵌完整文字編碼表（自動切換為原版 PDF 檢視）'
+        : '掃描版或純圖片 PDF 書籍（支援原版 PDF 檢視模式）',
       encoding: 'PDF-IMAGE',
       format: 'pdf',
-      pdfPageCount: data.numpages || 1,
+      pdfPageCount: (data && data.numpages) || 1,
       rawPdfUrl: bookId ? `/api/books/${encodeURIComponent(bookId)}/raw` : null,
       totalChapters: 1,
       totalWords: 0,
       chapters: [
         {
           index: 0,
-          title: `原版 PDF 檢視（共 ${data.numpages || 1} 頁）`,
-          content:
-            '此 PDF 檔案為掃描圖片版或不含文字圖層，已為您載入下方原版 PDF 線上檢視器（亦可點擊上方「📄 原版 PDF」全幅閱讀）。',
+          title: `原版 PDF 檢視（共 ${(data && data.numpages) || 1} 頁）`,
+          content: textIsGarbled
+            ? '此 PDF 檔案的字型未包含完整 Unicode 對應表（若強制擷取文字會出現亂碼），已自動為您切換至「📄 原版 PDF」原樣顯示。若裝置內嵌檢視器無法顯示，請點擊上方「↗ 新分頁開啟」以系統 PDF 閱讀器開啟。'
+            : '此 PDF 檔案為掃描圖片版或不含文字圖層，已為您載入下方原版 PDF 線上檢視器（亦可點擊上方「📄 原版 PDF」全幅閱讀）。',
           wordCount: 0
         }
       ]

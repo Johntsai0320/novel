@@ -1048,9 +1048,76 @@
     return new TextDecoder('latin1').decode(uint8Slice);
   }
 
+  function normalizePdfUnicodeTextClient(str) {
+    if (!str || typeof str !== 'string') return '';
+    return str.replace(/[\u2E80-\u2FDF\uF900-\uFAFF]/g, (ch) => ch.normalize('NFKC'));
+  }
+
+  function isGarbledPdfTextClient(text) {
+    if (!text || typeof text !== 'string') return true;
+    const nonWs = text.replace(/\s+/g, '');
+    if (nonWs.length === 0) return true;
+
+    let controlOrPua = 0;
+    let weirdOrExotic = 0;
+    let readable = 0;
+    let cjkCount = 0;
+    let kanaCount = 0;
+    let commonCjkCount = 0;
+    const commonCjkSet = new Set(
+      '的一是不了人在有我他這中大來上國個到說們為子和你地出道也時年得就那要下以生會自著去之過家學對可她裡后小心嗎啊呢吧，。、：；「」『』！？（）'
+    );
+
+    for (let i = 0; i < nonWs.length; i++) {
+      const code = nonWs.charCodeAt(i);
+      const ch = nonWs[i];
+      if (
+        code <= 0x1f ||
+        (code >= 0x7f && code <= 0x9f) ||
+        code === 0xfffd ||
+        (code >= 0xe000 && code <= 0xf8ff) ||
+        code >= 0xfff0
+      ) {
+        controlOrPua++;
+        continue;
+      }
+      if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) {
+        cjkCount++;
+        readable++;
+        if (commonCjkSet.has(ch)) commonCjkCount++;
+        continue;
+      }
+      if (code >= 0x3040 && code <= 0x30ff) {
+        kanaCount++;
+        readable++;
+        continue;
+      }
+      if (
+        (code >= 0x3000 && code <= 0x303f) ||
+        (code >= 0xac00 && code <= 0xd7af) ||
+        (code >= 0xff01 && code <= 0xff5e) ||
+        (code >= 0x20 && code <= 0x7e) ||
+        '—–…·•「」『』《》〈〉【】〔〕、。，．！？：；（）°±×÷©®§€£¥'.includes(ch)
+      ) {
+        readable++;
+        if (commonCjkSet.has(ch)) commonCjkCount++;
+        continue;
+      }
+      weirdOrExotic++;
+    }
+
+    const total = nonWs.length;
+    if (controlOrPua / total > 0.05) return true;
+    if (weirdOrExotic / total > 0.16) return true;
+    if (readable / total < 0.58) return true;
+    if (cjkCount >= 80 && kanaCount < 10 && commonCjkCount / cjkCount < 0.025) return true;
+    return false;
+  }
+
   function decodeHexUtf16BeClient(hex) {
     if (!hex) return '';
     const clean = hex.replace(/\s+/g, '');
+    if (!clean) return '';
     if (clean.length === 2) return String.fromCharCode(parseInt(clean, 16));
     const padded = clean.length % 2 === 0 ? clean : '0' + clean;
     let out = '';
@@ -1064,19 +1131,41 @@
 
   function parseToUnicodeCMapClient(cmapStr) {
     const map = new Map();
+    const codespaces = [];
     let keyByteLen = 2;
-    const bfcharRegex = /beginbfchar([\s\S]*?)endbfchar/g;
+    let saw1Byte = false;
+    let saw2Byte = false;
+
+    const csRegex = /begincodespacerange([\s\S]*?)endcodespacerange/g;
     let m;
+    while ((m = csRegex.exec(cmapStr)) !== null) {
+      const pairRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+      let p;
+      while ((p = pairRegex.exec(m[1])) !== null) {
+        const lenBytes = Math.max(1, Math.ceil(p[1].length / 2));
+        const start = parseInt(p[1], 16);
+        const end = parseInt(p[2], 16);
+        if (!Number.isNaN(start) && !Number.isNaN(end)) {
+          codespaces.push({ lenBytes, start, end });
+          if (lenBytes === 1) saw1Byte = true;
+          else if (lenBytes === 2) saw2Byte = true;
+        }
+      }
+    }
+
+    const bfcharRegex = /beginbfchar([\s\S]*?)endbfchar/g;
     while ((m = bfcharRegex.exec(cmapStr)) !== null) {
       const pairRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
       let p;
       while ((p = pairRegex.exec(m[1])) !== null) {
-        if (p[1].length === 2) keyByteLen = 1;
+        if (p[1].length <= 2) saw1Byte = true;
+        else saw2Byte = true;
         const code = parseInt(p[1], 16);
         const u = decodeHexUtf16BeClient(p[2]);
         if (!Number.isNaN(code) && u) map.set(code, u);
       }
     }
+
     const bfrangeRegex = /beginbfrange([\s\S]*?)endbfrange/g;
     while ((m = bfrangeRegex.exec(cmapStr)) !== null) {
       const rangeDirectRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
@@ -1084,34 +1173,139 @@
       while ((r = rangeDirectRegex.exec(m[1])) !== null) {
         const s = parseInt(r[1], 16);
         const e = parseInt(r[2], 16);
-        const base = parseInt(r[3], 16);
-        if (r[1].length === 2) keyByteLen = 1;
-        if (!Number.isNaN(s) && !Number.isNaN(e) && !Number.isNaN(base)) {
+        const dstHex = r[3].replace(/\s+/g, '');
+        if (r[1].length <= 2) saw1Byte = true;
+        else saw2Byte = true;
+        if (!Number.isNaN(s) && !Number.isNaN(e) && dstHex) {
           const lim = Math.min(e, s + 4096);
-          for (let c = s; c <= lim; c++) map.set(c, String.fromCodePoint(base + (c - s)));
+          if (dstHex.length <= 4) {
+            const base = parseInt(dstHex, 16);
+            if (!Number.isNaN(base)) {
+              for (let c = s; c <= lim; c++) {
+                const cp = base + (c - s);
+                if (cp >= 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff)) {
+                  map.set(c, String.fromCodePoint(cp));
+                }
+              }
+            }
+          } else {
+            const prefixHex = dstHex.slice(0, dstHex.length - 4);
+            const tailVal = parseInt(dstHex.slice(-4), 16);
+            if (!Number.isNaN(tailVal)) {
+              for (let c = s; c <= lim; c++) {
+                const tailHex = ((tailVal + (c - s)) & 0xffff).toString(16).padStart(4, '0');
+                const decoded = decodeHexUtf16BeClient(prefixHex + tailHex);
+                if (decoded) map.set(c, decoded);
+              }
+            }
+          }
+        }
+      }
+      const rangeArrayRegex = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*\[([\s\S]*?)\]/g;
+      while ((r = rangeArrayRegex.exec(m[1])) !== null) {
+        const s = parseInt(r[1], 16);
+        const e = parseInt(r[2], 16);
+        if (r[1].length <= 2) saw1Byte = true;
+        else saw2Byte = true;
+        const items = r[3].match(/<([0-9A-Fa-f]+)>/g) || [];
+        for (let i = 0; i < items.length && s + i <= e; i++) {
+          const decoded = decodeHexUtf16BeClient(items[i].slice(1, -1));
+          if (decoded) map.set(s + i, decoded);
         }
       }
     }
-    return { map, keyByteLen };
+
+    if (saw2Byte) keyByteLen = 2;
+    else if (saw1Byte) keyByteLen = 1;
+    return { map, keyByteLen, codespaces };
   }
 
   function decodeHexWithCMapClient(hexStr, cmapObj) {
     const clean = hexStr.replace(/\s+/g, '');
     if (!clean) return '';
-    if (clean.toUpperCase().startsWith('FEFF')) return decodeHexUtf16BeClient(clean.slice(4));
+    if (clean.toUpperCase().startsWith('FEFF') && clean.length >= 8) {
+      return decodeHexUtf16BeClient(clean.slice(4));
+    }
     if (cmapObj && cmapObj.map && cmapObj.map.size > 0) {
       const step = cmapObj.keyByteLen === 1 ? 2 : 4;
       let out = '';
       for (let i = 0; i < clean.length; i += step) {
         const slice = clean.slice(i, i + step);
         const code = parseInt(slice, 16);
-        if (cmapObj.map.has(code)) out += cmapObj.map.get(code);
-        else if (code >= 0x20) out += String.fromCharCode(code);
+        if (cmapObj.map.has(code)) {
+          out += cmapObj.map.get(code);
+        } else if (step === 4 && slice.length === 4) {
+          const hi = parseInt(slice.slice(0, 2), 16);
+          const lo = parseInt(slice.slice(2, 4), 16);
+          if (cmapObj.map.has(hi) && cmapObj.map.has(lo)) {
+            out += cmapObj.map.get(hi) + cmapObj.map.get(lo);
+          } else if (hi === 0x00 && lo >= 0x20 && lo <= 0x7e) {
+            out += String.fromCharCode(lo);
+          }
+        } else if (step === 2 && code >= 0x20 && code <= 0x7e) {
+          out += String.fromCharCode(code);
+        }
       }
       return out;
     }
+    let allAscii = clean.length >= 4 && clean.length % 2 === 0;
+    for (let i = 0; allAscii && i < clean.length; i += 2) {
+      const b = parseInt(clean.slice(i, i + 2), 16);
+      if (b !== 0x09 && b !== 0x0a && b !== 0x0d && (b < 0x20 || b > 0x7e)) allAscii = false;
+    }
+    if (allAscii) {
+      let ascii = '';
+      for (let i = 0; i < clean.length; i += 2) ascii += String.fromCharCode(parseInt(clean.slice(i, i + 2), 16));
+      return ascii;
+    }
     if (clean.length % 4 === 0) return decodeHexUtf16BeClient(clean);
     return clean;
+  }
+
+  function unescapePdfLiteralClient(str, cmapObj) {
+    const raw = str
+      .replace(/\\\r?\n/g, '')
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\\(/g, '(')
+      .replace(/\\\)/g, ')')
+      .replace(/\\\\/g, '\\')
+      .replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
+
+    if (raw.length >= 2 && raw.charCodeAt(0) === 0xfe && raw.charCodeAt(1) === 0xff) {
+      let out = '';
+      for (let i = 2; i + 1 < raw.length; i += 2) {
+        out += String.fromCharCode((raw.charCodeAt(i) << 8) | raw.charCodeAt(i + 1));
+      }
+      return out;
+    }
+
+    if (cmapObj && cmapObj.map && cmapObj.map.size > 0) {
+      if (cmapObj.keyByteLen === 2 && raw.length >= 2 && raw.length % 2 === 0) {
+        let mapped = '';
+        let hits = 0;
+        for (let i = 0; i + 1 < raw.length; i += 2) {
+          const code = (raw.charCodeAt(i) << 8) | raw.charCodeAt(i + 1);
+          if (cmapObj.map.has(code)) {
+            mapped += cmapObj.map.get(code);
+            hits++;
+          } else if (raw.charCodeAt(i) === 0 && raw.charCodeAt(i + 1) >= 0x20 && raw.charCodeAt(i + 1) <= 0x7e) {
+            mapped += raw[i + 1];
+          }
+        }
+        if (hits > 0 || mapped.length > 0) return mapped;
+      } else if (cmapObj.keyByteLen === 1) {
+        let mapped = '';
+        for (let i = 0; i < raw.length; i++) {
+          const code = raw.charCodeAt(i);
+          if (cmapObj.map.has(code)) mapped += cmapObj.map.get(code);
+          else if (code >= 0x20 && code <= 0x7e) mapped += raw[i];
+        }
+        return mapped;
+      }
+    }
+    return raw;
   }
 
   async function parsePdfClient(arrayBuffer, filename) {
@@ -1125,60 +1319,114 @@
       const pageMatches = rawLatin1.match(/\/Type\s*\/Page\b(?!s)/g);
       const numpages = pageMatches ? pageMatches.length : 1;
 
-      const globalCMap = new Map();
-      let globalKeyByteLen = 2;
+      const cmapsByObjId = new Map();
+      const fontObjToCmapObj = new Map();
+      const resourceNameToFontObj = new Map();
+      const globalCMap1Map = new Map();
+      const globalCMap2Map = new Map();
       const contentStreams = [];
 
-      const streamRegex = /stream(?:\r\n|\n)([\s\S]*?)endstream/g;
-      let match;
-      while ((match = streamRegex.exec(rawLatin1)) !== null) {
-        const startOffset = match.index + match[0].indexOf(match[1]);
-        const endOffset = startOffset + match[1].length;
-        const contentStr = await inflateStreamClient(uint8.subarray(startOffset, endOffset));
-        if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
-          const parsed = parseToUnicodeCMapClient(contentStr);
-          if (parsed.keyByteLen === 1) globalKeyByteLen = 1;
-          for (const [k, v] of parsed.map.entries()) globalCMap.set(k, v);
-        } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
-          contentStreams.push(contentStr);
+      const scanDictClient = (dictStr, objId = null) => {
+        if (objId !== null) {
+          const toUni = dictStr.match(/\/ToUnicode\s+(\d+)\s+\d+\s+R/);
+          if (toUni) fontObjToCmapObj.set(objId, parseInt(toUni[1], 10));
+        }
+        const fdRe = /\/([A-Za-z0-9_.+-]+)\s+(\d+)\s+\d+\s+R/g;
+        let fm;
+        while ((fm = fdRe.exec(dictStr)) !== null) {
+          if (!['Type', 'Parent', 'Resources', 'Contents', 'MediaBox', 'CropBox', 'ToUnicode', 'FontDescriptor', 'BaseFont', 'Encoding', 'DescendantFonts'].includes(fm[1])) {
+            resourceNameToFontObj.set(fm[1], parseInt(fm[2], 10));
+          }
+        }
+      };
+
+      const objRegex = /(\d+)\s+\d+\s+obj\b([\s\S]*?)endobj/g;
+      let objMatch;
+      while ((objMatch = objRegex.exec(rawLatin1)) !== null) {
+        const objId = parseInt(objMatch[1], 10);
+        const objBody = objMatch[2];
+        scanDictClient(objBody, objId);
+
+        const streamMatch = objBody.match(/stream(?:\r\n|\n)([\s\S]*?)endstream/);
+        if (streamMatch) {
+          const startOffset = objMatch.index + objMatch[0].indexOf(streamMatch[1]);
+          const endOffset = startOffset + streamMatch[1].length;
+          const contentStr = await inflateStreamClient(uint8.subarray(startOffset, endOffset));
+          if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
+            const parsed = parseToUnicodeCMapClient(contentStr);
+            cmapsByObjId.set(objId, parsed);
+            const target = parsed.keyByteLen === 1 ? globalCMap1Map : globalCMap2Map;
+            for (const [k, v] of parsed.map.entries()) if (!target.has(k)) target.set(k, v);
+          } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
+            contentStreams.push(contentStr);
+          } else if (contentStr.includes('/ToUnicode') || contentStr.includes('/Font')) {
+            scanDictClient(contentStr, null);
+          }
         }
       }
 
-      const cmapObj = { map: globalCMap, keyByteLen: globalKeyByteLen };
+      if (contentStreams.length === 0) {
+        const streamRegex = /stream(?:\r\n|\n)([\s\S]*?)endstream/g;
+        let match;
+        while ((match = streamRegex.exec(rawLatin1)) !== null) {
+          const startOffset = match.index + match[0].indexOf(match[1]);
+          const endOffset = startOffset + match[1].length;
+          const contentStr = await inflateStreamClient(uint8.subarray(startOffset, endOffset));
+          if (contentStr.includes('beginbfchar') || contentStr.includes('beginbfrange')) {
+            const parsed = parseToUnicodeCMapClient(contentStr);
+            const target = parsed.keyByteLen === 1 ? globalCMap1Map : globalCMap2Map;
+            for (const [k, v] of parsed.map.entries()) if (!target.has(k)) target.set(k, v);
+          } else if (contentStr.includes('BT') && contentStr.includes('ET')) {
+            contentStreams.push(contentStr);
+          }
+        }
+      }
+
+      const defaultCmapObj =
+        globalCMap2Map.size > 0
+          ? { map: globalCMap2Map, keyByteLen: 2 }
+          : globalCMap1Map.size > 0
+          ? { map: globalCMap1Map, keyByteLen: 1 }
+          : null;
       const pages = [];
 
       for (const contentStr of contentStreams) {
         const pageLines = [];
         let currentLine = '';
+        let activeCmapObj = defaultCmapObj;
         let lastTmY = null;
         const btEtRegex = /\bBT\b([\s\S]*?)\bET\b/g;
         let btMatch;
         while ((btMatch = btEtRegex.exec(contentStr)) !== null) {
           const block = btMatch[1];
           const tokenRegex =
-            /(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|')|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|\bT\*/g;
+            /\/([A-Za-z0-9_.+-]+)\s+[-+]?\d+(?:\.\d+)?\s+Tf\b|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f\s]+)>\s*Tj|\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|'|")|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dD]\b|\bT\*/g;
           let tok;
           while ((tok = tokenRegex.exec(block)) !== null) {
-            if (tok[6] !== undefined) {
-              const tmY = parseFloat(tok[6]);
+            if (tok[1] !== undefined) {
+              const fontObjId = resourceNameToFontObj.get(tok[1]);
+              const cmapObjId = fontObjId ? fontObjToCmapObj.get(fontObjId) : null;
+              activeCmapObj = cmapObjId && cmapsByObjId.has(cmapObjId) ? cmapsByObjId.get(cmapObjId) : defaultCmapObj;
+            } else if (tok[7] !== undefined) {
+              const tmY = parseFloat(tok[7]);
               if (lastTmY !== null && Math.abs(tmY - lastTmY) > 2 && currentLine.trim()) {
                 pageLines.push(currentLine);
                 currentLine = '';
               }
               lastTmY = tmY;
-            } else if (tok[7] !== undefined) {
+            } else if (tok[8] !== undefined) {
               const subRegex = /<([0-9A-Fa-f\s]+)>|\(([^()\\]*(?:\\.[^()\\]*)*)\)/g;
               let sub;
-              while ((sub = subRegex.exec(tok[7])) !== null) {
-                if (sub[1] !== undefined) currentLine += decodeHexWithCMapClient(sub[1], cmapObj);
-                else if (sub[2] !== undefined) currentLine += sub[2];
+              while ((sub = subRegex.exec(tok[8])) !== null) {
+                if (sub[1] !== undefined) currentLine += decodeHexWithCMapClient(sub[1], activeCmapObj);
+                else if (sub[2] !== undefined) currentLine += unescapePdfLiteralClient(sub[2], activeCmapObj);
               }
-            } else if (tok[8] !== undefined) {
-              currentLine += decodeHexWithCMapClient(tok[8], cmapObj);
             } else if (tok[9] !== undefined) {
-              currentLine += tok[9];
-            } else if (tok[10] !== undefined && tok[11] !== undefined) {
-              if (Math.abs(parseFloat(tok[11])) > 0.1 && currentLine.trim()) {
+              currentLine += decodeHexWithCMapClient(tok[9], activeCmapObj);
+            } else if (tok[10] !== undefined) {
+              currentLine += unescapePdfLiteralClient(tok[10], activeCmapObj);
+            } else if (tok[11] !== undefined && tok[12] !== undefined) {
+              if (Math.abs(parseFloat(tok[12])) > 0.1 && currentLine.trim()) {
                 pageLines.push(currentLine);
                 currentLine = '';
               }
@@ -1192,11 +1440,11 @@
             currentLine = '';
           }
         }
-        if (pageLines.length > 0) pages.push(pageLines.join('\n'));
+        if (pageLines.length > 0) pages.push(normalizePdfUnicodeTextClient(pageLines.join('\n')));
       }
 
       const rawFullText = pages.join('\n\n').trim();
-      if (rawFullText.replace(/\s+/g, '').length > 20) {
+      if (rawFullText.replace(/\s+/g, '').length > 20 && !isGarbledPdfTextClient(rawFullText)) {
         const reflowed = reflowPdfTextClient(pages, {
           stripHeadersFooters: true,
           mergeBrokenLines: true
@@ -1230,7 +1478,7 @@
           index: 0,
           title: '原版 PDF 閱讀器',
           originalTitle: '原版 PDF 閱讀器',
-          content: '已載入原版 PDF 檢視器。',
+          content: '此 PDF 未包含可直接重排之 Unicode 文字圖層，已為您自動切換為原版 PDF 檢視模式。',
           wordCount: 0
         }
       ]
