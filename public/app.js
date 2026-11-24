@@ -1651,16 +1651,49 @@
   // ==========================================================================
   let syncTimeout = null;
 
-  async function pullCloudSync(silent = false) {
+  function hasUnsyncedLocalData(remote) {
+    const r = remote || {};
+    for (const [bookId, lProg] of Object.entries(state.progress || {})) {
+      if (!lProg) continue;
+      const rProg = r.progress?.[bookId];
+      if (!rProg || new Date(lProg.updatedAt || 0) > new Date(rProg.updatedAt || 0)) {
+        return true;
+      }
+    }
+    for (const [bookId, lStat] of Object.entries(state.bookStatus || {})) {
+      if (!lStat) continue;
+      const rStat = r.bookStatus?.[bookId];
+      if (!rStat || new Date(lStat.updatedAt || 0) > new Date(rStat.updatedAt || 0)) {
+        return true;
+      }
+    }
+    for (const [bookId, lList] of Object.entries(state.bookmarks || {})) {
+      if (Array.isArray(lList) && lList.length > 0 && (!r.bookmarks?.[bookId] || r.bookmarks[bookId].length === 0)) {
+        return true;
+      }
+    }
+    for (const [bookId, lAnnot] of Object.entries(state.annotations || {})) {
+      if (lAnnot && typeof lAnnot === 'object' && !r.annotations?.[bookId]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function pullCloudSync(silent = false, { skipRender = false } = {}) {
     updateSyncIndicator('同步中...');
     try {
       if (state.serverAvailable) {
         const res = await apiFetch(`/api/sync?syncKey=${encodeURIComponent(state.syncKey)}`);
         if (res.ok && res.data) {
-          mergeIncomingSyncData(res.data);
+          const needsBackfill = hasUnsyncedLocalData(res.data);
+          mergeIncomingSyncData(res.data, { skipRender });
+          if (needsBackfill) {
+            await pushCloudSync();
+          }
           updateSyncIndicator('☁️ 雲端進度已同步');
           if (!silent) showToast(`已同步「${state.syncKey}」的跨裝置閱讀紀錄`);
-          return;
+          return { synced: true, pushedLocal: needsBackfill };
         }
       } else if (state.webdavConfig?.enableWebdav && state.webdavConfig?.webdavUrl) {
         const syncUrl = buildDirectWebdavUrl('.novel-reader-sync.json');
@@ -1672,10 +1705,14 @@
           const store = await res.json();
           const profile = store?.profiles?.[state.syncKey];
           if (profile) {
-            mergeIncomingSyncData(profile);
+            const needsBackfill = hasUnsyncedLocalData(profile);
+            mergeIncomingSyncData(profile, { skipRender });
+            if (needsBackfill) {
+              await pushCloudSync();
+            }
             updateSyncIndicator('☁️ WebDAV 已同步');
             if (!silent) showToast(`已從 WebDAV 同步「${state.syncKey}」的閱讀紀錄`);
-            return;
+            return { synced: true, pushedLocal: needsBackfill };
           }
         }
       }
@@ -1683,9 +1720,10 @@
     } catch (err) {
       updateSyncIndicator('⚠️ 離線快取模式');
     }
+    return { synced: false, pushedLocal: false };
   }
 
-  function mergeIncomingSyncData(remote) {
+  function mergeIncomingSyncData(remote, { skipRender = false } = {}) {
     if (!remote) return;
     if (remote.progress && typeof remote.progress === 'object') {
       for (const [bookId, rProg] of Object.entries(remote.progress)) {
@@ -1730,10 +1768,12 @@
       applyReaderSettingsToDOM();
     }
     saveLocalCache();
-    renderLibrary();
+    if (!skipRender) {
+      renderLibrary();
+    }
   }
 
-  async function pushCloudSync(singleBookProgress = null) {
+  async function pushCloudSync(singleBookProgress = null, { keepalive = false } = {}) {
     saveLocalCache();
     updateSyncIndicator('☁️ 正在儲存進度...');
     try {
@@ -1749,6 +1789,7 @@
         };
         await apiFetch('/api/sync', {
           method: 'POST',
+          keepalive,
           body: JSON.stringify(payload)
         });
         updateSyncIndicator('☁️ 進度已同步');
@@ -1781,7 +1822,7 @@
     }
   }
 
-  function scheduleProgressSync() {
+  function scheduleProgressSync(immediate = false) {
     if (!state.currentBook || !state.currentChapter) return;
 
     const scrollPercent = calculateCurrentScrollPercent();
@@ -1804,9 +1845,14 @@
     saveLocalCache();
 
     if (syncTimeout) clearTimeout(syncTimeout);
-    syncTimeout = setTimeout(() => {
+    if (immediate) {
+      syncTimeout = null;
       pushCloudSync(record);
-    }, 900);
+    } else {
+      syncTimeout = setTimeout(() => {
+        pushCloudSync(record);
+      }, 900);
+    }
   }
 
   function updateSyncIndicator(text) {
@@ -1821,7 +1867,7 @@
   // ==========================================================================
   // 6. Initialize & Load Library Books
   // ==========================================================================
-  async function loadLibrary(page = state.currentPage) {
+  async function loadLibrary(page = state.currentPage, skipBackfillRefresh = false) {
     state.currentPage = page;
     const connDot = document.getElementById('conn-dot');
     const connText = document.getElementById('conn-status-text');
@@ -1879,7 +1925,10 @@
     }
 
     if (nasLoaded) {
-      await pullCloudSync(true);
+      const syncResult = await pullCloudSync(true, { skipRender: true });
+      if (syncResult?.pushedLocal && !skipBackfillRefresh) {
+        return loadLibrary(state.currentPage, true);
+      }
       renderLibrary();
       return;
     }
@@ -3342,7 +3391,7 @@
       updateScrollRibbon();
       setTimeout(() => {
         state.isRestoringScroll = false;
-        scheduleProgressSync();
+        scheduleProgressSync(true);
       }, 150);
     });
   }
@@ -3367,13 +3416,7 @@
     renderLibrary();
     if (state.serverAvailable) {
       pushCloudSync().then(() => {
-        if (
-          state.selectedPubStatus !== 'ALL' ||
-          state.selectedReadStatus !== 'ALL' ||
-          state.sortBy === 'recent'
-        ) {
-          loadLibrary(state.currentPage);
-        }
+        loadLibrary(state.currentPage, true);
       });
     }
   }
@@ -5706,12 +5749,23 @@
       });
     }
 
-    // Sync before page unload or visibility hidden (mobile app switch)
+    // Sync immediately before page unload or visibility hidden (mobile app switch)
+    const flushProgressOnLeave = () => {
+      if (!state.currentBook || !state.currentChapter) return;
+      scheduleProgressSync(false);
+      if (syncTimeout) {
+        clearTimeout(syncTimeout);
+        syncTimeout = null;
+      }
+      const record = state.progress[state.currentBook.id] || null;
+      pushCloudSync(record, { keepalive: true });
+    };
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden' && state.currentBook) {
-        scheduleProgressSync();
+      if (document.visibilityState === 'hidden') {
+        flushProgressOnLeave();
       }
     });
+    window.addEventListener('pagehide', flushProgressOnLeave);
   }
 
   function openNasModal() {
