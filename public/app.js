@@ -240,6 +240,12 @@
     inMemoryBooks: new Map(), // For static/WebDAV direct mode parsed books
     selectedFolder: 'ALL',
     selectedFormat: 'ALL',
+    selectedPubStatus: 'ALL',
+    selectedReadStatus: 'ALL',
+    statusCounts: null,
+    selectionMode: false,
+    selectedBookIds: new Set(),
+    editingStatusBookId: null,
     sortBy: 'recent',
     searchQuery: '',
     currentPage: 1,
@@ -252,6 +258,7 @@
     progress: {},
     bookmarks: {},
     annotations: {}, // { [bookId]: { highlights: [...], strokes: { [chIdx]: [...] } } }
+    bookStatus: {},  // { [bookId]: { pubStatus?, readStatus?, updatedAt } }
     settings: {
       theme: 'sepia',
       fontSize: 19,
@@ -374,6 +381,7 @@
           progress: state.progress,
           bookmarks: state.bookmarks,
           annotations: state.annotations,
+          bookStatus: state.bookStatus,
           settings: state.settings,
           updatedAt: new Date().toISOString()
         })
@@ -387,9 +395,67 @@
     if (cachedSync.progress) state.progress = cachedSync.progress;
     if (cachedSync.bookmarks) state.bookmarks = cachedSync.bookmarks;
     if (cachedSync.annotations) state.annotations = cachedSync.annotations;
+    if (cachedSync.bookStatus) state.bookStatus = cachedSync.bookStatus;
     if (cachedSync.settings) {
       state.settings = { ...state.settings, ...cachedSync.settings };
     }
+  }
+
+  const PUB_STATUS_LABELS = {
+    ongoing: '連載中',
+    completed: '已完結',
+    oneshot: '全一冊',
+    hiatus: '斷尾'
+  };
+
+  const READ_STATUS_LABELS = {
+    unread: '未讀',
+    reading: '正在讀',
+    finished: '已讀完',
+    dropped: '棄追'
+  };
+
+  function deriveBookPubStatusClient(book) {
+    if (!book) return '';
+    const manual = state.bookStatus?.[book.id]?.pubStatus;
+    if (manual && PUB_STATUS_LABELS[manual]) return manual;
+    if (book.pubStatus && PUB_STATUS_LABELS[book.pubStatus] && !state.bookStatus?.[book.id]) {
+      return book.pubStatus;
+    }
+    const target = `${book.originalFolder || book.folder || ''} ${book.filename || book.originalTitle || ''}`;
+    if (/完結|完结|完本|全本|全集|大結局|大结局|\(完\)|\[完\]|【完】/i.test(target)) {
+      return 'completed';
+    }
+    if (/連載|连载|更新中/i.test(target)) {
+      return 'ongoing';
+    }
+    if (/全一冊|全一册|單行本|单行本|短篇/i.test(target)) {
+      return 'oneshot';
+    }
+    if (/斷尾|断尾|斷更|断更|太監|太监|棄坑|弃坑/i.test(target)) {
+      return 'hiatus';
+    }
+    return '';
+  }
+
+  function deriveBookReadStatusClient(book) {
+    if (!book) return 'unread';
+    const manual = state.bookStatus?.[book.id]?.readStatus;
+    if (manual && READ_STATUS_LABELS[manual]) return manual;
+    const prog = state.progress?.[book.id];
+    if (prog) {
+      const totalCh = Math.max(1, prog.totalChapters || 1);
+      const chIdx = prog.chapterIndex || 0;
+      const pct = prog.scrollPercent || 0;
+      if (chIdx >= totalCh - 1 && pct >= 92) {
+        return 'finished';
+      }
+      return 'reading';
+    }
+    if (book.readStatus && READ_STATUS_LABELS[book.readStatus] && !state.bookStatus?.[book.id]) {
+      return book.readStatus;
+    }
+    return 'unread';
   }
 
   // ==========================================================================
@@ -1760,6 +1826,7 @@
     const connDot = document.getElementById('conn-dot');
     const connText = document.getElementById('conn-status-text');
 
+    let nasLoaded = false;
     try {
       // 1. Try connecting to NAS Backend API (/api/health & /api/books with pagination)
       const health = await apiFetch('/api/health');
@@ -1805,13 +1872,16 @@
         connDot.classList.remove('offline');
         const countDisplay = (booksRes.totalAll || booksRes.total || 0).toLocaleString();
         connText.textContent = `NAS 伺服器已連線 (${countDisplay} 本小說)`;
-
-        await pullCloudSync(true);
-        renderLibrary();
-        return;
+        nasLoaded = true;
       }
     } catch (_) {
       state.serverAvailable = false;
+    }
+
+    if (nasLoaded) {
+      await pullCloudSync(true);
+      renderLibrary();
+      return;
     }
 
     // 2. Direct Browser WebDAV Mode (when hosted on GitHub Pages without backend)
