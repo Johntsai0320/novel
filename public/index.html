@@ -214,7 +214,10 @@
             <button type="button" class="status-pill" data-pub-status="oneshot" role="tab" aria-selected="false">全一冊</button>
             <button type="button" class="status-pill" data-pub-status="hiatus" role="tab" aria-selected="false">斷尾</button>
           </div>
-          <button type="button" id="toggle-select-mode-btn" class="select-mode-trigger" title="切換批次選取模式">長按進入選取模式</button>
+          <div class="classification-tools-group" style="display:flex;align-items:center;gap:0.45rem;margin-left:auto;flex-wrap:wrap;">
+            <button type="button" id="offline-filter-btn" class="select-mode-trigger" style="margin-left:0;" title="僅顯示已下載快取到本機離線書庫的書籍">💾 離線書庫</button>
+            <button type="button" id="toggle-select-mode-btn" class="select-mode-trigger" style="margin-left:0;" title="切換批次選取模式">長按進入選取模式</button>
+          </div>
         </div>
 
         <div id="read-status-tabs" class="status-pills-row" role="tablist" aria-label="閱讀狀態篩選">
@@ -230,6 +233,7 @@
           <div class="batch-bar-top">
             <span id="batch-selected-count" class="batch-selected-count">已選取 0 本書籍</span>
             <div class="batch-bar-actions">
+              <button type="button" id="batch-download-offline-btn" class="btn batch-tag-btn">💾 批次存離線</button>
               <button type="button" id="batch-select-all-btn" class="btn batch-tag-btn">全選目前清單</button>
               <button type="button" id="batch-cancel-select-btn" class="btn batch-tag-btn">結束選取</button>
             </div>
@@ -828,6 +832,48 @@
 
     <div class="modal-actions">
       <button type="button" id="close-status-modal-footer-btn" class="btn btn-primary">完成</button>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       MODAL: 下載到本機 / 離線快取省電閱讀
+       ==================================================================== -->
+  <div id="download-book-modal" class="modal-dialog" role="dialog" aria-labelledby="download-modal-title">
+    <div class="modal-header">
+      <h2 id="download-modal-title">⬇ 下載到本機（離線省電閱讀）</h2>
+      <button type="button" id="close-download-modal-btn" class="btn" style="padding: 0.25rem 0.6rem;">✕</button>
+    </div>
+
+    <div class="form-group">
+      <div id="download-modal-book-name" style="font-family: var(--font-serif); font-weight: 700; font-size: 1rem; margin-bottom: 0.35rem; color: var(--text-primary);"></div>
+      <div id="download-modal-book-meta" class="form-hint" style="margin-bottom: 0.85rem;"></div>
+
+      <div style="display: flex; flex-direction: column; gap: 0.65rem;">
+        <button type="button" id="download-raw-file-btn" class="btn btn-primary" style="justify-content: flex-start; padding: 0.7rem 0.9rem; white-space: normal; text-align: left;">
+          📄 下載原始檔案到本機（建議：可關 Wi-Fi 用 BOOX 內建 NeoReader／KOReader 看最省電）
+        </button>
+
+        <button type="button" id="save-offline-cache-btn" class="btn" style="justify-content: flex-start; padding: 0.7rem 0.9rem; white-space: normal; text-align: left;">
+          💾 儲存至「雲端書閣」離線快取（保留簡轉繁、直橫排、筆記與漫畫排版）
+        </button>
+
+        <button type="button" id="remove-offline-cache-btn" class="btn" style="display: none; justify-content: flex-start; padding: 0.6rem 0.9rem; color: var(--accent);">
+          🗑️ 移除此書的書閣離線快取
+        </button>
+      </div>
+
+      <div class="form-hint" style="margin-top: 0.75rem; line-height: 1.55;">
+        🔋 <strong>省電建議</strong>：外出或長時閱讀可先點「下載原始檔案」存到閱讀器本機，或存進「離線書庫」後關閉 Wi-Fi 與 Tailscale，完全不耗聯網電量。
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-bottom: 0; padding-top: 0.65rem; border-top: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+      <span id="offline-storage-stats" class="form-hint" style="margin: 0;">本機離線快取：計算中...</span>
+      <button type="button" id="clear-all-offline-btn" class="btn" style="padding: 0.25rem 0.65rem; font-size: 0.75rem;">🧹 清空全部離線快取</button>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" id="close-download-modal-footer-btn" class="btn">關閉</button>
     </div>
   </div>
 

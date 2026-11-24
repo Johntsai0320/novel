@@ -1107,7 +1107,14 @@ button {
   text-decoration: line-through;
 }
 
-.book-tag-btn {
+.book-status-chip.chip-offline {
+  background: rgba(15, 118, 110, 0.14);
+  border-color: rgba(15, 118, 110, 0.35);
+  color: #0F766E;
+}
+
+.book-tag-btn,
+.book-download-btn {
   padding: 0.1rem 0.42rem;
   border-radius: 999px;
   font-size: 0.68rem;
@@ -1116,7 +1123,8 @@ button {
   background: transparent;
 }
 
-.book-tag-btn:hover {
+.book-tag-btn:hover,
+.book-download-btn:hover {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-soft);

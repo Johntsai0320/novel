@@ -242,6 +242,10 @@
     selectedFormat: 'ALL',
     selectedPubStatus: 'ALL',
     selectedReadStatus: 'ALL',
+    offlineOnly: false,
+    offlineBookIds: new Set(),
+    offlineMetaMap: new Map(),
+    downloadingBook: null,
     statusCounts: null,
     selectionMode: false,
     selectedBookIds: new Set(),
@@ -521,6 +525,249 @@
     } finally {
       if (timerId) clearTimeout(timerId);
     }
+  }
+
+  // ==========================================================================
+  // 3b. Optional Offline Book Storage (IndexedDB) & Local File Download
+  // ==========================================================================
+  const OFFLINE_DB_NAME = 'novel_reader_offline_db';
+  const OFFLINE_STORE_NAME = 'books';
+
+  function openOfflineDb() {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        reject(new Error('此瀏覽器不支援 IndexedDB 離線儲存'));
+        return;
+      }
+      const req = indexedDB.open(OFFLINE_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(OFFLINE_STORE_NAME)) {
+          db.createObjectStore(OFFLINE_STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('開啟離線資料庫失敗'));
+    });
+  }
+
+  async function refreshOfflineCatalog() {
+    try {
+      const db = await openOfflineDb();
+      const records = await new Promise((resolve, reject) => {
+        const tx = db.transaction(OFFLINE_STORE_NAME, 'readonly');
+        const store = tx.objectStore(OFFLINE_STORE_NAME);
+        const all = [];
+        const cursorReq = store.openCursor();
+        cursorReq.onsuccess = (ev) => {
+          const cursor = ev.target.result;
+          if (cursor) {
+            const val = cursor.value || {};
+            all.push({
+              id: val.id,
+              source: val.source || 'offline',
+              relativePath: val.relativePath || val.filename || '',
+              filename: val.filename || '',
+              title: val.title || val.originalTitle || val.filename || '',
+              originalTitle: val.originalTitle || val.title || val.filename || '',
+              folder: val.folder || val.originalFolder || '離線書庫',
+              originalFolder: val.originalFolder || val.folder || '離線書庫',
+              format: val.format || 'txt',
+              size: val.size || (val.buffer ? val.buffer.byteLength : 0),
+              mtime: val.mtime || val.savedAt || '',
+              savedAt: val.savedAt || ''
+            });
+            cursor.continue();
+          } else {
+            resolve(all);
+          }
+        };
+        cursorReq.onerror = () => reject(cursorReq.error);
+      });
+      db.close();
+      state.offlineBookIds = new Set(records.map((r) => r.id));
+      state.offlineMetaMap = new Map(records.map((r) => [r.id, r]));
+      return records;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async function saveBookToOfflineStore(bookMeta, arrayBuffer) {
+    const db = await openOfflineDb();
+    const record = {
+      id: bookMeta.id,
+      source: bookMeta.source || 'local',
+      relativePath: bookMeta.relativePath || bookMeta.filename || '',
+      filename: bookMeta.filename || `${bookMeta.originalTitle || bookMeta.title || 'book'}.${bookMeta.format || 'txt'}`,
+      title: bookMeta.title || bookMeta.originalTitle || '',
+      originalTitle: bookMeta.originalTitle || bookMeta.title || '',
+      folder: bookMeta.folder || bookMeta.originalFolder || '離線書庫',
+      originalFolder: bookMeta.originalFolder || bookMeta.folder || '離線書庫',
+      format: bookMeta.format || 'txt',
+      size: arrayBuffer.byteLength || bookMeta.size || 0,
+      mtime: bookMeta.mtime || '',
+      savedAt: new Date().toISOString(),
+      buffer: arrayBuffer
+    };
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(OFFLINE_STORE_NAME, 'readwrite');
+      tx.objectStore(OFFLINE_STORE_NAME).put(record);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error('儲存離線快取失敗'));
+    });
+    db.close();
+    await refreshOfflineCatalog();
+    return record;
+  }
+
+  async function getOfflineBookRecord(bookId) {
+    try {
+      const db = await openOfflineDb();
+      const rec = await new Promise((resolve, reject) => {
+        const tx = db.transaction(OFFLINE_STORE_NAME, 'readonly');
+        const req = tx.objectStore(OFFLINE_STORE_NAME).get(bookId);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      return rec;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function removeOfflineBook(bookId) {
+    try {
+      const db = await openOfflineDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(OFFLINE_STORE_NAME, 'readwrite');
+        tx.objectStore(OFFLINE_STORE_NAME).delete(bookId);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+      await refreshOfflineCatalog();
+    } catch (_) {}
+  }
+
+  async function clearAllOfflineBooks() {
+    try {
+      const db = await openOfflineDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(OFFLINE_STORE_NAME, 'readwrite');
+        tx.objectStore(OFFLINE_STORE_NAME).clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+      await refreshOfflineCatalog();
+    } catch (_) {}
+  }
+
+  async function parseBookBufferClient(arrayBuffer, bookMeta) {
+    const filename = bookMeta.filename || `${bookMeta.originalTitle || bookMeta.title || 'book'}.${bookMeta.format || 'txt'}`;
+    const fmt = (bookMeta.format || '').toLowerCase();
+    if (fmt === 'epub') return await parseEpubClient(arrayBuffer, filename);
+    if (fmt === 'cbz') return await parseCbzClient(arrayBuffer, filename);
+    if (fmt === 'mobi' || fmt === 'azw' || fmt === 'azw3') return parseMobiClient(arrayBuffer, filename);
+    if (fmt === 'pdf') return await parsePdfClient(arrayBuffer, filename);
+    return parseTxtClient(decodeArrayBufferClient(arrayBuffer), filename);
+  }
+
+  async function fetchBookRawArrayBuffer(bookMeta) {
+    if (state.serverAvailable && !String(bookMeta.id).startsWith('local_upload_')) {
+      const url = `${getApiBase()}/api/books/${encodeURIComponent(bookMeta.id)}/raw`;
+      const headers = getApiHeaders();
+      delete headers['Content-Type'];
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error(`下載失敗 (${res.status})`);
+      return await res.arrayBuffer();
+    }
+    if (String(bookMeta.id).startsWith('webdav_direct_')) {
+      const fileUrl = buildDirectWebdavUrl(bookMeta.relativePath);
+      const res = await fetch(fileUrl, { method: 'GET', headers: getDirectWebdavHeaders() });
+      if (!res.ok) throw new Error(`WebDAV 下載失敗 (${res.status})`);
+      return await res.arrayBuffer();
+    }
+    const existingOffline = await getOfflineBookRecord(bookMeta.id);
+    if (existingOffline && existingOffline.buffer) {
+      return existingOffline.buffer;
+    }
+    const memBook = state.inMemoryBooks.get(bookMeta.id);
+    if (memBook && Array.isArray(memBook.chapters)) {
+      const text = memBook.chapters.map((c) => `${c.originalTitle || c.title}\n\n${c.content || ''}`).join('\n\n');
+      return new TextEncoder().encode(text).buffer;
+    }
+    throw new Error('目前無法取得原始檔案，請先連線至 NAS 書庫');
+  }
+
+  async function downloadBookRawToDevice(bookMeta) {
+    if (!bookMeta) return;
+    const filename = bookMeta.filename || `${bookMeta.originalTitle || bookMeta.title || 'book'}.${bookMeta.format || 'txt'}`;
+    if (state.serverAvailable && !String(bookMeta.id).startsWith('local_upload_') && !state.webdavConfig?.enableWebdav) {
+      // Direct browser attachment download (works seamlessly in EInkBro / Chrome with original filename!)
+      const url = `${getApiBase()}/api/books/${encodeURIComponent(bookMeta.id)}/raw?download=1`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      showToast(`⬇ 已開始下載「${filename}」至裝置下載資料夾`);
+      return;
+    }
+
+    showToast(`⏳ 正在準備「${filename}」...`);
+    const buf = await fetchBookRawArrayBuffer(bookMeta);
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+    showToast(`⬇ 已下載「${filename}」至本機`);
+  }
+
+  function updateDownloadModalUI() {
+    const book = state.downloadingBook;
+    if (!book) return;
+    const isCached = state.offlineBookIds.has(book.id);
+    const saveBtn = document.getElementById('save-offline-cache-btn');
+    const removeBtn = document.getElementById('remove-offline-cache-btn');
+    if (saveBtn) {
+      saveBtn.textContent = isCached
+        ? '✅ 已快取於「雲端書閣」離線書庫（點擊可重新更新）'
+        : '💾 儲存至「雲端書閣」離線快取（保留簡轉繁、直橫排、筆記與漫畫排版）';
+    }
+    if (removeBtn) {
+      removeBtn.style.display = isCached ? 'inline-flex' : 'none';
+    }
+    const statsEl = document.getElementById('offline-storage-stats');
+    if (statsEl) {
+      let totalBytes = 0;
+      state.offlineMetaMap.forEach((m) => {
+        totalBytes += m.size || 0;
+      });
+      statsEl.textContent = `目前離線書庫：${state.offlineMetaMap.size} 本書籍（共 ${formatBytes(totalBytes)}）`;
+    }
+  }
+
+  function openDownloadBookModal(book) {
+    if (!book) return;
+    state.downloadingBook = book;
+    const nameEl = document.getElementById('download-modal-book-name');
+    const metaEl = document.getElementById('download-modal-book-meta');
+    if (nameEl) nameEl.textContent = convertStr(book.originalTitle || book.title);
+    if (metaEl) {
+      metaEl.textContent = `格式：${(book.format || 'txt').toUpperCase()} · 大小：${formatBytes(book.size)} · 檔名：${book.filename || ''}`;
+    }
+    updateDownloadModalUI();
+    document.getElementById('drawer-backdrop').classList.add('open');
+    document.getElementById('download-book-modal').classList.add('open');
   }
 
   // ==========================================================================
@@ -2141,10 +2388,38 @@
     return null;
   }
 
+  function getOfflineBooksList() {
+    return Array.from(state.offlineMetaMap.values()).map((b) => ({
+      ...b,
+      title: convertStr(b.originalTitle || b.title),
+      folder: convertStr(b.originalFolder || b.folder)
+    }));
+  }
+
   async function loadLibrary(page = state.currentPage, skipBackfillRefresh = false) {
     state.currentPage = page;
     const connDot = document.getElementById('conn-dot');
     const connText = document.getElementById('conn-status-text');
+
+    await refreshOfflineCatalog();
+
+    if (state.offlineOnly) {
+      const offlineList = getOfflineBooksList();
+      state.books = offlineList;
+      state.totalBooksCount = offlineList.length;
+      state.totalPages = 1;
+      state.statusCounts = null;
+      const fMap = {};
+      offlineList.forEach((b) => {
+        const key = b.originalFolder || b.folder || '離線書庫';
+        fMap[key] = (fMap[key] || 0) + 1;
+      });
+      state.folderCountsMap = fMap;
+      connDot.classList.remove('offline');
+      connText.textContent = `💾 本機離線書庫 (${offlineList.length} 本已快取 · 省電零網路流量)`;
+      renderLibrary();
+      return;
+    }
 
     let nasLoaded = false;
     let syncResult = null;
@@ -2228,8 +2503,22 @@
         renderLibrary();
         return;
       } catch (err) {
-        showToast(`WebDAV 直接連線失敗 (${err.message})，切換至展示書庫`);
+        showToast(`WebDAV 直接連線失敗 (${err.message})`);
       }
+    }
+
+    // 2b. Offline IndexedDB Library Mode (works with Wi-Fi / Tailscale turned off!)
+    if (state.offlineMetaMap.size > 0) {
+      const offlineList = getOfflineBooksList();
+      state.connectionMode = 'offline-db';
+      state.books = offlineList;
+      state.totalBooksCount = offlineList.length;
+      state.totalPages = 1;
+      state.statusCounts = null;
+      connDot.classList.remove('offline');
+      connText.textContent = `📴 離線閱讀模式 (${offlineList.length} 本本機離線書 · 省電中)`;
+      renderLibrary();
+      return;
     }
 
     // 3. Fallback: Static GitHub Pages Demo Mode (loads ./demo-books.json)
@@ -2335,7 +2624,10 @@
   }
 
   function renderStatusFilterTabs() {
-    const counts = state.serverAvailable && state.statusCounts ? state.statusCounts : computeClientStatusCounts();
+    const counts =
+      !state.offlineOnly && state.serverAvailable && state.statusCounts
+        ? state.statusCounts
+        : computeClientStatusCounts();
     const pubLabels = {
       ALL: '全部狀態',
       ongoing: '連載中',
@@ -2370,6 +2662,13 @@
           ? `${readLabels[val] || val} <span class="status-pill-count">${cnt}</span>`
           : `${readLabels[val] || val}`;
     });
+
+    const offlineFilterBtn = document.getElementById('offline-filter-btn');
+    if (offlineFilterBtn) {
+      const offCount = state.offlineBookIds ? state.offlineBookIds.size : 0;
+      offlineFilterBtn.classList.toggle('active', Boolean(state.offlineOnly));
+      offlineFilterBtn.textContent = offCount > 0 ? `💾 離線書庫 (${offCount})` : '💾 離線書庫';
+    }
 
     const selectTriggerBtn = document.getElementById('toggle-select-mode-btn');
     if (selectTriggerBtn) {
@@ -2566,8 +2865,8 @@
 
     let displayBooks = state.books || [];
 
-    // When running in client-only mode (Direct WebDAV or Static Demo), apply boolean search & folder/format/status filter client-side
-    if (!state.serverAvailable && displayBooks.length > 0) {
+    // When running in client-only or offline-only mode, apply boolean search & folder/format/status filter client-side
+    if ((!state.serverAvailable || state.offlineOnly) && displayBooks.length > 0) {
       if (state.selectedFolder && state.selectedFolder !== 'ALL') {
         displayBooks = displayBooks.filter(
           (b) => (b.originalFolder || b.folder) === state.selectedFolder
@@ -2600,8 +2899,12 @@
     if (!displayBooks || displayBooks.length === 0) {
       grid.innerHTML = `
         <div class="empty-state" style="grid-column: 1 / -1;">
-          <h3>找不到符合條件的小說檔案</h3>
-          <p>支援邏輯搜尋：<b>空白</b> 或 <b>&amp;</b> 代表「且 (AND)」、<b>|</b> 代表「或 (OR)」、<b>-關鍵字</b> 代表「排除 (NOT)」、<b>()</b> 代表括號分組。<br/>範例：<code>火影|海賊 系統 -後宮</code></p>
+          <h3>${state.offlineOnly ? '目前尚未儲存任何離線書籍' : '找不到符合條件的小說檔案'}</h3>
+          <p>${
+            state.offlineOnly
+              ? '請先取消「💾 離線書庫」篩選，並在想離線省電閱讀的書籍卡片上點擊「⬇ 下載」。'
+              : '支援邏輯搜尋：<b>空白</b> 或 <b>&amp;</b> 代表「且 (AND)」、<b>|</b> 代表「或 (OR)」、<b>-關鍵字</b> 代表「排除 (NOT)」、<b>()</b> 代表括號分組。<br/>範例：<code>火影|海賊 系統 -後宮</code>'
+          }</p>
         </div>
       `;
       return;
@@ -2613,6 +2916,7 @@
       const pubStatus = deriveBookPubStatusClient(book);
       const readStatus = deriveBookReadStatusClient(book);
       const isSelected = state.selectedBookIds.has(book.id);
+      const isOfflineCached = state.offlineBookIds && state.offlineBookIds.has(book.id);
 
       let statusHtml = '尚未開始閱讀';
       let actionLabel = '開始閱讀 →';
@@ -2637,6 +2941,9 @@
       const readBadgeHtml = `<span class="book-status-chip chip-read-${readStatus}">${
         READ_STATUS_LABELS[readStatus] || '未讀'
       }</span>`;
+      const offlineBadgeHtml = isOfflineCached
+        ? `<span class="book-status-chip chip-offline" title="已快取於本機離線書庫，不走網路即可省電閱讀">💾 已離線</span>`
+        : '';
 
       const card = document.createElement('article');
       card.className = `book-card${state.selectionMode ? ' selectable' : ''}${
@@ -2654,12 +2961,14 @@
             <span class="book-folder-tag">📁 ${escapeHtml(book.folder)}</span>
             <h3 class="book-title">${escapeHtml(book.title)}</h3>
             <div class="book-details-line">
-              ${formatBytes(book.size)} · ${book.source.includes('webdav') ? 'WebDAV 遠端' : 'NAS 書庫'}
+              ${formatBytes(book.size)} · ${book.source.includes('webdav') ? 'WebDAV 遠端' : isOfflineCached ? '本機已離線' : 'NAS 書庫'}
             </div>
             <div class="book-status-badges">
               ${pubBadgeHtml}
               ${readBadgeHtml}
+              ${offlineBadgeHtml}
               <button type="button" class="book-tag-btn" title="更改作品狀態（連載中/已完結）或閱讀狀態">🏷️ 分類</button>
+              <button type="button" class="book-download-btn" title="下載原檔到本機或儲存為離線省電書庫">⬇ 下載</button>
             </div>
           </div>
         </div>
@@ -2677,6 +2986,14 @@
         });
       }
 
+      const dlBtn = card.querySelector('.book-download-btn');
+      if (dlBtn) {
+        dlBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openDownloadBookModal(book);
+        });
+      }
+
       // Long-press (520ms) to enter selection mode cleanly on touch / mouse / stylus
       let longPressTimer = null;
       let longPressTriggered = false;
@@ -2691,7 +3008,7 @@
       };
 
       card.addEventListener('pointerdown', (e) => {
-        if (e.target.closest('.book-tag-btn')) return;
+        if (e.target.closest('.book-tag-btn, .book-download-btn')) return;
         if (state.selectionMode) return;
         longPressTriggered = false;
         startX = e.clientX;
@@ -2700,7 +3017,7 @@
           longPressTriggered = true;
           state.selectedBookIds.add(book.id);
           toggleSelectionMode(true);
-          showToast('☑️ 已進入選取模式，可繼續點選其他書籍批次標記狀態');
+          showToast('☑️ 已進入選取模式，可繼續點選其他書籍批次標記狀態或批次存離線');
         }, 520);
       });
 
@@ -2714,7 +3031,7 @@
       card.addEventListener('pointercancel', cancelLongPress);
 
       card.addEventListener('click', (e) => {
-        if (e.target.closest('.book-tag-btn')) return;
+        if (e.target.closest('.book-tag-btn, .book-download-btn')) return;
         if (longPressTriggered) {
           longPressTriggered = false;
           return;
@@ -2782,42 +3099,23 @@
     document.getElementById('chapter-body').innerHTML = '<p>正在從 NAS 線上讀取章節內容（免下載整本檔案）...</p>';
 
     try {
-      // Load Book TOC first
-      if (state.serverAvailable && !state.inMemoryBooks.has(bookId)) {
-        const tocRes = await apiFetch(
-          `/api/books/${encodeURIComponent(bookId)}/toc?convert=${encodeURIComponent(state.settings.convertMode)}`
-        );
-        state.currentBook = tocRes.book;
-      } else if (!state.inMemoryBooks.has(bookId) && bookId.startsWith('webdav_direct_')) {
-        const bookMeta = state.books.find((b) => b.id === bookId);
-        if (!bookMeta) throw new Error('找不到 WebDAV 書籍項目');
-        const fileUrl = buildDirectWebdavUrl(bookMeta.relativePath);
-        const res = await fetch(fileUrl, {
-          method: 'GET',
-          headers: getDirectWebdavHeaders()
-        });
-        if (!res.ok) throw new Error(`WebDAV 讀取失敗 (${res.status})`);
-        const arrayBuf = await res.arrayBuffer();
-        let parsed;
-        if (bookMeta.format === 'epub') {
-          parsed = await parseEpubClient(arrayBuf, bookMeta.filename);
-        } else if (bookMeta.format === 'cbz') {
-          parsed = await parseCbzClient(arrayBuf, bookMeta.filename);
-        } else if (bookMeta.format === 'mobi') {
-          parsed = parseMobiClient(arrayBuf, bookMeta.filename);
-        } else if (bookMeta.format === 'pdf') {
-          parsed = await parsePdfClient(arrayBuf, bookMeta.filename);
-        } else {
-          parsed = parseTxtClient(decodeArrayBufferClient(arrayBuf), bookMeta.filename);
+      // 0. Check local IndexedDB offline cache first (zero Wi-Fi / Tailscale battery drain!)
+      if (!state.inMemoryBooks.has(bookId) && state.offlineBookIds && state.offlineBookIds.has(bookId)) {
+        const offlineRec = await getOfflineBookRecord(bookId);
+        if (offlineRec && offlineRec.buffer) {
+          document.getElementById('chapter-body').innerHTML = '<p>💾 正在從閱讀器本機離線快取開啟（免連線省電模式）...</p>';
+          const parsed = await parseBookBufferClient(offlineRec.buffer, offlineRec);
+          const memObj = {
+            ...offlineRec,
+            ...parsed,
+            id: bookId
+          };
+          state.inMemoryBooks.set(bookId, memObj);
         }
-        const memObj = {
-          ...bookMeta,
-          ...parsed,
-          id: bookId
-        };
-        state.inMemoryBooks.set(bookId, memObj);
-        state.currentBook = memObj;
-      } else if (state.inMemoryBooks.has(bookId)) {
+      }
+
+      // Load Book TOC first
+      if (state.inMemoryBooks.has(bookId)) {
         const memBook = state.inMemoryBooks.get(bookId);
         state.currentBook = {
           ...memBook,
@@ -2831,6 +3129,29 @@
             pageCount: c.pageCount || null
           }))
         };
+      } else if (state.serverAvailable) {
+        const tocRes = await apiFetch(
+          `/api/books/${encodeURIComponent(bookId)}/toc?convert=${encodeURIComponent(state.settings.convertMode)}`
+        );
+        state.currentBook = tocRes.book;
+      } else if (bookId.startsWith('webdav_direct_')) {
+        const bookMeta = state.books.find((b) => b.id === bookId);
+        if (!bookMeta) throw new Error('找不到 WebDAV 書籍項目');
+        const fileUrl = buildDirectWebdavUrl(bookMeta.relativePath);
+        const res = await fetch(fileUrl, {
+          method: 'GET',
+          headers: getDirectWebdavHeaders()
+        });
+        if (!res.ok) throw new Error(`WebDAV 讀取失敗 (${res.status})`);
+        const arrayBuf = await res.arrayBuffer();
+        const parsed = await parseBookBufferClient(arrayBuf, bookMeta);
+        const memObj = {
+          ...bookMeta,
+          ...parsed,
+          id: bookId
+        };
+        state.inMemoryBooks.set(bookId, memObj);
+        state.currentBook = memObj;
       } else {
         throw new Error('找不到該書籍資料');
       }
@@ -6015,6 +6336,152 @@
     const closeStatusModalFooterBtn = document.getElementById('close-status-modal-footer-btn');
     if (closeStatusModalFooterBtn) closeStatusModalFooterBtn.addEventListener('click', closeModals);
 
+    const offlineFilterBtn = document.getElementById('offline-filter-btn');
+    if (offlineFilterBtn) {
+      offlineFilterBtn.addEventListener('click', () => {
+        state.offlineOnly = !state.offlineOnly;
+        state.currentPage = 1;
+        loadLibrary(1);
+      });
+    }
+
+    const batchDownloadOfflineBtn = document.getElementById('batch-download-offline-btn');
+    if (batchDownloadOfflineBtn) {
+      batchDownloadOfflineBtn.addEventListener('click', async () => {
+        const ids = Array.from(state.selectedBookIds);
+        if (ids.length === 0) {
+          showToast('請先點選至少一本書籍');
+          return;
+        }
+        batchDownloadOfflineBtn.disabled = true;
+        let successCount = 0;
+        let failCount = 0;
+        try {
+          for (let i = 0; i < ids.length; i += 1) {
+            const bookId = ids[i];
+            const bookMeta =
+              state.books.find((b) => b.id === bookId) ||
+              state.offlineMetaMap.get(bookId) ||
+              null;
+            if (!bookMeta) {
+              failCount += 1;
+              continue;
+            }
+            if (state.offlineBookIds.has(bookId)) {
+              successCount += 1;
+              continue;
+            }
+            showToast(`正在下載離線快取 (${i + 1}/${ids.length})：${bookMeta.title}`);
+            try {
+              const buf = await fetchBookRawArrayBuffer(bookMeta);
+              await saveBookToOfflineStore(bookMeta, buf);
+              successCount += 1;
+            } catch (err) {
+              console.warn('批次離線快取失敗:', bookMeta.title, err);
+              failCount += 1;
+            }
+          }
+          renderStatusFilterTabs();
+          renderBooksGrid();
+          showToast(
+            failCount > 0
+              ? `💾 離線快取完成：成功 ${successCount} 本，失敗 ${failCount} 本`
+              : `💾 已將 ${successCount} 本書籍存入離線書庫，可關閉網路省電閱讀`
+          );
+        } finally {
+          batchDownloadOfflineBtn.disabled = false;
+        }
+      });
+    }
+
+    const closeDownloadModalBtn = document.getElementById('close-download-modal-btn');
+    if (closeDownloadModalBtn) closeDownloadModalBtn.addEventListener('click', closeModals);
+    const closeDownloadModalFooterBtn = document.getElementById('close-download-modal-footer-btn');
+    if (closeDownloadModalFooterBtn) {
+      closeDownloadModalFooterBtn.addEventListener('click', closeModals);
+    }
+
+    const downloadRawFileBtn = document.getElementById('download-raw-file-btn');
+    if (downloadRawFileBtn) {
+      downloadRawFileBtn.addEventListener('click', async () => {
+        if (!state.downloadingBook) return;
+        downloadRawFileBtn.disabled = true;
+        try {
+          await downloadBookRawToDevice(state.downloadingBook);
+          showToast(`📄 已觸發下載「${state.downloadingBook.title}」原始檔案`);
+        } catch (err) {
+          showToast(`下載原始檔案失敗：${err.message || err}`);
+        } finally {
+          downloadRawFileBtn.disabled = false;
+        }
+      });
+    }
+
+    const saveOfflineCacheBtn = document.getElementById('save-offline-cache-btn');
+    if (saveOfflineCacheBtn) {
+      saveOfflineCacheBtn.addEventListener('click', async () => {
+        if (!state.downloadingBook) return;
+        const targetBook = state.downloadingBook;
+        saveOfflineCacheBtn.disabled = true;
+        const prevText = saveOfflineCacheBtn.textContent;
+        saveOfflineCacheBtn.textContent = '⏳ 正在下載快取...';
+        try {
+          const buf = await fetchBookRawArrayBuffer(targetBook);
+          await saveBookToOfflineStore(targetBook, buf);
+          updateDownloadModalUI();
+          renderStatusFilterTabs();
+          renderBooksGrid();
+          showToast(`💾 「${targetBook.title}」已存入離線書庫，可關掉 Wi-Fi 閱讀`);
+        } catch (err) {
+          showToast(`儲存離線快取失敗：${err.message || err}`);
+        } finally {
+          saveOfflineCacheBtn.disabled = false;
+          saveOfflineCacheBtn.textContent = prevText;
+          updateDownloadModalUI();
+        }
+      });
+    }
+
+    const removeOfflineCacheBtn = document.getElementById('remove-offline-cache-btn');
+    if (removeOfflineCacheBtn) {
+      removeOfflineCacheBtn.addEventListener('click', async () => {
+        if (!state.downloadingBook) return;
+        const targetBook = state.downloadingBook;
+        try {
+          await removeOfflineBook(targetBook.id);
+          updateDownloadModalUI();
+          renderStatusFilterTabs();
+          if (state.offlineOnly) {
+            await loadLibrary(1);
+          } else {
+            renderBooksGrid();
+          }
+          showToast(`🗑️ 已從離線書庫移除「${targetBook.title}」`);
+        } catch (err) {
+          showToast(`移除離線快取失敗：${err.message || err}`);
+        }
+      });
+    }
+
+    const clearAllOfflineBtn = document.getElementById('clear-all-offline-btn');
+    if (clearAllOfflineBtn) {
+      clearAllOfflineBtn.addEventListener('click', async () => {
+        try {
+          await clearAllOfflineBooks();
+          updateDownloadModalUI();
+          renderStatusFilterTabs();
+          if (state.offlineOnly) {
+            await loadLibrary(1);
+          } else {
+            renderBooksGrid();
+          }
+          showToast('🧹 已清空全部離線快取書籍');
+        } catch (err) {
+          showToast(`清空離線快取失敗：${err.message || err}`);
+        }
+      });
+    }
+
     // Homepage Feature Overview Collapse/Expand Toggle
     const introSection = document.getElementById('feature-intro-section');
     const toggleIntroBtn = document.getElementById('toggle-feature-intro-btn');
@@ -6075,7 +6542,10 @@
     document.getElementById('upload-modal').classList.remove('open');
     const statusModal = document.getElementById('book-status-modal');
     if (statusModal) statusModal.classList.remove('open');
+    const downloadModal = document.getElementById('download-book-modal');
+    if (downloadModal) downloadModal.classList.remove('open');
     state.editingStatusBookId = null;
+    state.downloadingBook = null;
   }
 
   // ==========================================================================
@@ -6085,6 +6555,14 @@
     initOpenCC();
     applyReaderSettingsToDOM();
     bindEvents();
+    if ('serviceWorker' in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+    refreshOfflineCatalog()
+      .then(() => {
+        renderStatusFilterTabs();
+      })
+      .catch(() => {});
     loadLibrary();
   });
 })();

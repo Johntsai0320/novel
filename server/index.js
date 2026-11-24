@@ -678,13 +678,16 @@ app.get('/api/books/:id/toc', async (req, res) => {
 });
 
 /**
- * 3b. Stream Raw File (e.g. Native PDF Viewer stream with Range support)
+ * 3b. Stream Raw File (e.g. Native PDF Viewer stream or offline original file download)
  */
 app.get('/api/books/:id/raw', async (req, res) => {
   try {
     const { id } = req.params;
     const { source, relativePath } = decodeBookId(id);
-    const ext = path.extname(relativePath).toLowerCase();
+    const filename = path.basename(relativePath) || 'book';
+    const ext = path.extname(filename).toLowerCase();
+    const isDownload = req.query.download === '1' || req.query.download === 'true';
+
     const contentType =
       ext === '.pdf'
         ? 'application/pdf'
@@ -692,7 +695,16 @@ app.get('/api/books/:id/raw', async (req, res) => {
         ? 'application/epub+zip'
         : ext === '.cbz'
         ? 'application/vnd.comicbook+zip'
+        : ext === '.txt'
+        ? 'text/plain; charset=utf-8'
+        : ext === '.mobi' || ext === '.azw' || ext === '.azw3'
+        ? 'application/x-mobipocket-ebook'
         : 'application/octet-stream';
+
+    const asciiFallbackName = filename.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_') || `book${ext}`;
+    const disposition = isDownload
+      ? `attachment; filename="${asciiFallbackName}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+      : 'inline';
 
     if (source === 'local') {
       const safeRel = path.normalize(relativePath).replace(/^(\.\.(\/|\\|$))+/, '');
@@ -701,16 +713,28 @@ app.get('/api/books/:id/raw', async (req, res) => {
         return res.status(404).end();
       }
       res.setHeader('Content-Type', contentType);
-      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Content-Disposition', disposition);
       return res.sendFile(fullPath);
     }
 
     const headerWebdav = getRequestWebdavConfig(req);
-    const { buffer } = await getParsedBook(id, headerWebdav);
+    let { buffer } = await getParsedBook(id, headerWebdav);
+    if (!buffer && source === 'webdav') {
+      const cfg = headerWebdav || loadNasConfig();
+      buffer = await fetchWebdavFileBuffer(
+        {
+          url: cfg.webdavUrl || cfg.url,
+          username: cfg.webdavUsername || cfg.username,
+          password: cfg.webdavPassword || cfg.password,
+          basePath: cfg.webdavBasePath || cfg.basePath || '/'
+        },
+        relativePath
+      );
+    }
     if (!buffer) return res.status(404).end();
 
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Content-Disposition', disposition);
     res.send(buffer);
   } catch (_) {
     res.status(404).end();
