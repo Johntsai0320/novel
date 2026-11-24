@@ -2253,6 +2253,8 @@ mark.reader-highlight.has-note::after {
 
 .comic-page-img {
   display: block;
+  max-width: 100%;
+  height: auto;
   user-select: none;
   -webkit-user-drag: none;
   border-radius: 3px;
@@ -2260,17 +2262,20 @@ mark.reader-highlight.has-note::after {
   box-shadow: var(--shadow-sm);
 }
 
-.comic-fit-width .comic-page-img {
+.comic-fit-width .comic-page-img,
+.comic-fit-fit-width .comic-page-img {
   width: 100%;
   max-width: 100%;
   height: auto;
 }
 
-.comic-fit-contain .comic-page-img {
+.comic-fit-contain .comic-page-img,
+.comic-fit-fit-contain .comic-page-img {
   width: auto;
   max-width: 100%;
   max-height: calc(100vh - 195px - var(--eink-bottom-safe, 0px));
   max-height: calc(100dvh - 195px - var(--eink-bottom-safe, 0px));
+  max-height: calc(var(--reader-vh, 100dvh) - 195px - var(--eink-bottom-safe, 0px));
   height: auto;
   object-fit: contain;
 }
@@ -2324,6 +2329,7 @@ mark.reader-highlight.has-note::after {
 
 .comic-spread-pair .comic-page-wrapper {
   width: auto;
+  max-width: 100%;
   flex: 0 1 auto;
 }
 
@@ -2332,6 +2338,7 @@ mark.reader-highlight.has-note::after {
   max-width: 100%;
   max-height: calc(100vh - 205px - var(--eink-bottom-safe, 0px));
   max-height: calc(100dvh - 205px - var(--eink-bottom-safe, 0px));
+  max-height: calc(var(--reader-vh, 100dvh) - 205px - var(--eink-bottom-safe, 0px));
   object-fit: contain;
 }
 
@@ -2403,6 +2410,7 @@ mark.reader-highlight.has-note::after {
   .comic-spread-pair.is-double .comic-page-img {
     max-height: calc(100vh - 220px - var(--eink-bottom-safe, 0px));
     max-height: calc(100dvh - 220px - var(--eink-bottom-safe, 0px));
+    max-height: calc(var(--reader-vh, 100dvh) - 220px - var(--eink-bottom-safe, 0px));
   }
 }
 
@@ -2417,8 +2425,8 @@ mark.reader-highlight.has-note::after {
   right: 0.55rem;
   z-index: 95;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.25rem 0.55rem;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
   border-radius: 999px;
   background: rgba(20, 20, 20, 0.72);
   color: #fff;
@@ -2426,6 +2434,8 @@ mark.reader-highlight.has-note::after {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   box-shadow: var(--shadow-md);
+  max-width: calc(100vw - 1.1rem);
+  flex-wrap: wrap;
 }
 
 .fullscreen-hud-info {
@@ -2433,18 +2443,21 @@ mark.reader-highlight.has-note::after {
   font-size: 0.74rem;
   font-weight: 600;
   color: #fff;
-  padding-left: 0.2rem;
+  padding: 0 0.15rem;
 }
 
+.fullscreen-hud-action-btn,
 .fullscreen-hud-exit-btn {
-  padding: 0.22rem 0.55rem;
-  font-size: 0.74rem;
+  padding: 0.22rem 0.52rem;
+  font-size: 0.73rem;
+  min-height: 0 !important;
   background: rgba(255, 255, 255, 0.16);
   color: #fff;
   border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 999px;
 }
 
+.fullscreen-hud-action-btn:hover,
 .fullscreen-hud-exit-btn:hover {
   background: rgba(255, 255, 255, 0.28);
 }
@@ -2461,6 +2474,7 @@ body.eink-mode .fullscreen-hud-info {
   color: #000000;
 }
 
+body.eink-mode .fullscreen-hud-action-btn,
 body.eink-mode .fullscreen-hud-exit-btn {
   background: #ffffff;
   color: #000000;
@@ -2482,12 +2496,13 @@ body.reader-fullscreen .reader-progress-ribbon {
 body.reader-fullscreen .reader-canvas-wrapper.vertical-mode {
   height: 100vh;
   height: 100dvh;
+  height: var(--reader-vh, 100dvh);
   padding-top: 1.25rem;
   padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
 }
 
 body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas {
-  max-width: 100vw;
+  max-width: 100%;
   width: 100%;
   margin: 0;
   padding: 0;
@@ -2508,8 +2523,35 @@ body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-scroll-
 body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-paged-stage {
   min-height: 100vh;
   min-height: 100dvh;
+  min-height: var(--reader-vh, 100dvh);
+  width: 100%;
   padding: 0;
   gap: 0;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-paged-stage:not(.comic-fit-original) {
+  height: 100vh;
+  height: 100dvh;
+  height: var(--reader-vh, 100dvh);
+  overflow: hidden;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-paged-stage:not(.comic-fit-original) .comic-spread-pair {
+  max-width: 100%;
+  max-height: 100%;
+  height: 100%;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-paged-stage:not(.comic-fit-original) .comic-page-wrapper {
+  max-height: 100%;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-paged-stage:not(.comic-fit-original) .comic-spread-pair.is-double .comic-page-wrapper {
+  max-width: calc(50% - 3px);
 }
 
 body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-page-img {
@@ -2517,22 +2559,36 @@ body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-page-im
   box-shadow: none;
 }
 
-body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-fit-contain .comic-page-img,
-body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-spread-pair.is-double .comic-page-img {
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-paged-stage:not(.comic-fit-original) .comic-page-img {
   max-height: 100vh;
   max-height: 100dvh;
-  max-width: 100vw;
+  max-height: var(--reader-vh, 100dvh);
+  max-width: 100%;
   width: auto;
   height: auto;
   object-fit: contain;
 }
 
-body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-fit-width .comic-page-img {
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-scroll-container.comic-fit-contain .comic-page-img,
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-scroll-container.comic-fit-fit-contain .comic-page-img {
+  max-height: 100vh;
+  max-height: 100dvh;
+  max-height: var(--reader-vh, 100dvh);
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-scroll-container.comic-fit-width .comic-page-img,
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-scroll-container.comic-fit-fit-width .comic-page-img {
   width: 100%;
-  max-width: 100vw;
+  max-width: 100%;
+  height: auto;
 }
 
 body.reader-fullscreen .toast-container {
   bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
 }
+
 

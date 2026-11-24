@@ -3342,11 +3342,146 @@
         canvasEl.classList.remove('vertical-mode');
       }
     }
+
+    if (state.readerFullscreen && typeof updateFullscreenHUDInfo === 'function') {
+      updateFullscreenHUDInfo();
+    }
+  }
+
+  function getComicFitClassName(fit) {
+    if (fit === 'fit-contain') return 'comic-fit-contain';
+    if (fit === 'original') return 'comic-fit-original';
+    return 'comic-fit-width';
+  }
+
+  function findComicFullscreenAnchor(pagesRects) {
+    if (!Array.isArray(pagesRects) || pagesRects.length === 0) return null;
+    for (let i = 0; i < pagesRects.length; i++) {
+      const r = pagesRects[i];
+      if (r.bottom > 12) {
+        const ratioInPage =
+          r.top < 0 && r.height > 0 ? Math.min(0.98, Math.max(0, -r.top / r.height)) : 0;
+        return { pageIndex: i, ratioInPage };
+      }
+    }
+    return { pageIndex: pagesRects.length - 1, ratioInPage: 0 };
+  }
+
+  function computeRestoredAnchorScrollY(targetPageDocTop, targetPageHeight, anchor) {
+    if (!anchor) return null;
+    const offset = Math.round((anchor.ratioInPage || 0) * (targetPageHeight || 0));
+    return Math.max(0, Math.round(targetPageDocTop + offset));
+  }
+
+  function computeComicScrollTarget(
+    pagesRects,
+    viewportHeight,
+    currentScrollY,
+    maxScroll,
+    direction,
+    overlapRatio = 0.85
+  ) {
+    const usable = Math.max(240, viewportHeight);
+    const step = Math.max(160, Math.floor(usable * overlapRatio));
+
+    if (direction === 'next') {
+      if (maxScroll - currentScrollY <= 40) {
+        return { action: 'next-chapter', targetY: maxScroll };
+      }
+      if (Array.isArray(pagesRects) && pagesRects.length > 0) {
+        for (let i = 0; i < pagesRects.length; i++) {
+          const rect = pagesRects[i];
+          if (rect.bottom > usable + 4) {
+            if (rect.top > 8) {
+              return {
+                action: 'scroll',
+                targetY: Math.min(
+                  maxScroll,
+                  Math.max(currentScrollY + 1, Math.round(currentScrollY + rect.top))
+                )
+              };
+            }
+            const remainingInPage = rect.bottom - usable;
+            if (remainingInPage <= step * 1.15) {
+              return {
+                action: 'scroll',
+                targetY: Math.min(
+                  maxScroll,
+                  Math.max(currentScrollY + 1, Math.round(currentScrollY + remainingInPage))
+                )
+              };
+            }
+            return {
+              action: 'scroll',
+              targetY: Math.min(maxScroll, currentScrollY + step)
+            };
+          }
+        }
+      }
+      return { action: 'scroll', targetY: Math.min(maxScroll, currentScrollY + step) };
+    }
+
+    if (currentScrollY <= 40) {
+      return { action: 'prev-chapter', targetY: 0 };
+    }
+    if (Array.isArray(pagesRects) && pagesRects.length > 0) {
+      for (let i = 0; i < pagesRects.length; i++) {
+        const rect = pagesRects[i];
+        if (rect.bottom > 12) {
+          if (rect.top < -8) {
+            if (rect.height <= usable + 8 || -rect.top <= step * 1.15) {
+              return {
+                action: 'scroll',
+                targetY: Math.max(0, Math.round(currentScrollY + rect.top))
+              };
+            }
+            return {
+              action: 'scroll',
+              targetY: Math.max(0, currentScrollY - step)
+            };
+          }
+          if (i > 0) {
+            const prevRect = pagesRects[i - 1];
+            if (prevRect.height <= usable + 8) {
+              return {
+                action: 'scroll',
+                targetY: Math.max(0, Math.round(currentScrollY + prevRect.top))
+              };
+            }
+            return {
+              action: 'scroll',
+              targetY: Math.max(0, Math.round(currentScrollY + Math.max(prevRect.top, -step)))
+            };
+          }
+          break;
+        }
+      }
+    }
+    return { action: 'scroll', targetY: Math.max(0, currentScrollY - step) };
+  }
+
+  function getVisibleComicPageRects() {
+    const wraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
+    const rects = [];
+    wraps.forEach((w) => {
+      const r = w.getBoundingClientRect();
+      rects.push({ top: r.top, bottom: r.bottom, height: r.height });
+    });
+    return rects;
   }
 
   function setComicMode(newMode) {
+    const prevMode = state.settings.comicMode || 'scroll';
     const normalized = ['scroll', 'single', 'double'].includes(newMode) ? newMode : 'scroll';
     const prevPct = calculateCurrentScrollPercent();
+    let visibleAnchorPageIdx = null;
+    if (prevMode === 'scroll') {
+      const anchor = findComicFullscreenAnchor(getVisibleComicPageRects());
+      if (anchor) visibleAnchorPageIdx = anchor.pageIndex;
+    } else {
+      visibleAnchorPageIdx = state.comicCurrentPage || 0;
+    }
+
     state.settings.comicMode = normalized;
     updateComicModeUI();
     pushCloudSync();
@@ -3358,15 +3493,28 @@
     ) {
       if (normalized === 'single' || normalized === 'double') {
         const maxIdx = Math.max(0, state.currentComicPages.length - 1);
-        let idx = Math.min(maxIdx, Math.max(0, Math.round((prevPct / 100) * maxIdx)));
+        let idx =
+          visibleAnchorPageIdx !== null
+            ? visibleAnchorPageIdx
+            : Math.round((prevPct / 100) * maxIdx);
+        idx = Math.min(maxIdx, Math.max(0, idx));
         if (normalized === 'double') idx = idx - (idx % 2);
         state.comicCurrentPage = idx;
       }
       renderComicStage();
-      if (normalized === 'scroll' && prevPct > 0) {
+      if (normalized === 'scroll') {
         requestAnimationFrame(() => {
-          const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-          window.scrollTo({ top: Math.round((prevPct / 100) * maxScroll), behavior: 'instant' });
+          const wraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
+          if (visibleAnchorPageIdx !== null && wraps[visibleAnchorPageIdx]) {
+            const r = wraps[visibleAnchorPageIdx].getBoundingClientRect();
+            window.scrollTo({
+              top: Math.max(0, Math.round((window.scrollY || window.pageYOffset) + r.top)),
+              behavior: 'instant'
+            });
+          } else if (prevPct > 0) {
+            const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+            window.scrollTo({ top: Math.round((prevPct / 100) * maxScroll), behavior: 'instant' });
+          }
         });
       } else {
         window.scrollTo({ top: 0, behavior: 'instant' });
@@ -3429,6 +3577,12 @@
       original: '原始解析度寬度'
     };
     showToast(`🔍 圖片縮放：${labels[state.settings.comicFit]}`);
+  }
+
+  function cycleComicFitMode() {
+    const order = ['fit-width', 'fit-contain', 'original'];
+    const idx = order.indexOf(state.settings.comicFit || 'fit-width');
+    setComicFit(order[(idx + 1) % order.length]);
   }
 
   function goToComicPage(newIdx) {
@@ -3595,9 +3749,11 @@
       return wrap;
     };
 
+    const fitClass = getComicFitClassName(fit);
+
     if (mode === 'scroll') {
       const scrollContainer = document.createElement('div');
-      scrollContainer.className = `comic-scroll-container comic-fit-${fit}`;
+      scrollContainer.className = `comic-scroll-container ${fitClass}`;
       pages.forEach((p, idx) => {
         scrollContainer.appendChild(buildPageEl(p, idx < 3));
       });
@@ -3608,7 +3764,7 @@
     // Paged Single / Double Spread Stage
     const stage = document.createElement('div');
     stage.id = 'comic-paged-stage';
-    stage.className = `comic-paged-stage comic-fit-${fit}`;
+    stage.className = `comic-paged-stage ${fitClass}`;
 
     const spreadPair = document.createElement('div');
     const isDouble = mode === 'double';
@@ -4829,16 +4985,58 @@
     );
   }
 
+  function syncReaderViewportHeight() {
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (vh > 0) {
+      document.documentElement.style.setProperty('--reader-vh', `${vh}px`);
+    }
+  }
+
   function updateFullscreenHUDInfo() {
     const infoEl = document.getElementById('fullscreen-hud-info');
+    const hudModeBtn = document.getElementById('fullscreen-hud-comic-mode-btn');
+    const hudFitBtn = document.getElementById('fullscreen-hud-comic-fit-btn');
+    const isComic = isComicBookActive() && state.currentComicPages.length > 0;
+
+    if (hudModeBtn) {
+      if (isComic) {
+        const mode = state.settings.comicMode || 'scroll';
+        hudModeBtn.style.display = 'inline-flex';
+        hudModeBtn.textContent =
+          mode === 'double' ? '📖📖 雙頁' : mode === 'single' ? '📖 單頁' : '📜 條漫';
+      } else {
+        hudModeBtn.style.display = 'none';
+      }
+    }
+
+    if (hudFitBtn) {
+      if (isComic) {
+        const fit = state.settings.comicFit || 'fit-width';
+        hudFitBtn.style.display = 'inline-flex';
+        hudFitBtn.textContent =
+          fit === 'fit-contain' ? '🖼️ 整頁' : fit === 'original' ? '🔍 原寸' : '📐 適寬';
+      } else {
+        hudFitBtn.style.display = 'none';
+      }
+    }
+
     if (!infoEl) return;
-    if (isComicBookActive() && state.currentComicPages.length > 0) {
+    if (isComic) {
       const total = state.currentComicPages.length;
       const mode = state.settings.comicMode || 'scroll';
       if (mode === 'double' && state.comicCurrentPage + 1 < total) {
         infoEl.textContent = `${state.comicCurrentPage + 1}-${state.comicCurrentPage + 2} / ${total} 頁`;
       } else if (mode === 'scroll') {
-        infoEl.textContent = `條漫 · 共 ${total} 頁`;
+        const wraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
+        let currentVisiblePage = 1;
+        for (const w of wraps) {
+          const r = w.getBoundingClientRect();
+          if (r.bottom > 40) {
+            currentVisiblePage = (parseInt(w.dataset.pageIndex, 10) || 0) + 1;
+            break;
+          }
+        }
+        infoEl.textContent = `${currentVisiblePage} / ${total} 頁`;
       } else {
         infoEl.textContent = `${state.comicCurrentPage + 1} / ${total} 頁`;
       }
@@ -4853,6 +5051,14 @@
 
   async function setReaderFullscreen(enabled, options = {}) {
     const next = Boolean(enabled);
+    const isScrollComic =
+      isComicBookActive() &&
+      state.currentComicPages.length > 0 &&
+      (state.settings.comicMode || 'scroll') === 'scroll';
+    const scrollAnchor = isScrollComic
+      ? findComicFullscreenAnchor(getVisibleComicPageRects())
+      : null;
+
     state.readerFullscreen = next;
     document.body.classList.toggle('reader-fullscreen', next);
 
@@ -4892,6 +5098,22 @@
     }
 
     applyReaderSettingsToDOM();
+    if (isScrollComic && scrollAnchor) {
+      requestAnimationFrame(() => {
+        syncReaderViewportHeight();
+        const wraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
+        const targetWrap = wraps[scrollAnchor.pageIndex];
+        if (targetWrap) {
+          const rect = targetWrap.getBoundingClientRect();
+          const docTop = (window.scrollY || window.pageYOffset) + rect.top;
+          const targetY = computeRestoredAnchorScrollY(docTop, rect.height, scrollAnchor);
+          if (targetY !== null) {
+            window.scrollTo({ top: targetY, behavior: 'instant' });
+          }
+        }
+        updateFullscreenHUDInfo();
+      });
+    }
     if (isComicBookActive() && state.currentComicPages.length > 0) {
       scheduleComicSvgRefresh();
     }
@@ -4929,6 +5151,7 @@
     const s = state.settings;
     document.body.setAttribute('data-theme', s.theme || 'sepia');
     document.body.classList.toggle('reader-fullscreen', Boolean(state.readerFullscreen));
+    syncReaderViewportHeight();
 
     const root = document.documentElement;
     root.style.setProperty('--reader-font-size', `${s.fontSize || 19}px`);
@@ -5450,7 +5673,29 @@
       const viewportHeight = window.innerHeight;
       const usableViewport = Math.max(240, viewportHeight - getEffectiveBottomSafePx());
       const totalHeight = document.documentElement.scrollHeight;
-      const maxScroll = totalHeight - viewportHeight;
+      const maxScroll = Math.max(0, totalHeight - viewportHeight);
+
+      if (isComicBookActive() && !isComicPagedMode()) {
+        const res = computeComicScrollTarget(
+          getVisibleComicPageRects(),
+          usableViewport,
+          scrollY,
+          maxScroll,
+          'next',
+          overlapRatio
+        );
+        if (res.action === 'next-chapter') {
+          if (state.currentChapter && state.currentChapter.nextIndex !== null) {
+            loadAndRenderChapter(state.currentChapter.nextIndex, 0);
+            showToast(`已翻至下一話：${convertStr(state.currentChapter?.title || '')}`);
+          } else {
+            showToast('已是全書最後一話');
+          }
+        } else {
+          window.scrollTo({ top: res.targetY, behavior: scrollBehavior });
+        }
+        return;
+      }
 
       // Distance from bottom of current chapter
       const remainingBottom = maxScroll - scrollY;
@@ -5494,6 +5739,29 @@
       const scrollY = window.scrollY || window.pageYOffset;
       const viewportHeight = window.innerHeight;
       const usableViewport = Math.max(240, viewportHeight - getEffectiveBottomSafePx());
+      const maxScroll = Math.max(0, document.documentElement.scrollHeight - viewportHeight);
+
+      if (isComicBookActive() && !isComicPagedMode()) {
+        const res = computeComicScrollTarget(
+          getVisibleComicPageRects(),
+          usableViewport,
+          scrollY,
+          maxScroll,
+          'prev',
+          overlapRatio
+        );
+        if (res.action === 'prev-chapter') {
+          if (state.currentChapter && state.currentChapter.prevIndex !== null) {
+            loadAndRenderChapter(state.currentChapter.prevIndex, 100);
+            showToast(`已翻至上一話：${convertStr(state.currentChapter?.title || '')}`);
+          } else {
+            showToast('已是第一話頂部');
+          }
+        } else {
+          window.scrollTo({ top: res.targetY, behavior: scrollBehavior });
+        }
+        return;
+      }
 
       // If already at or very near top (within 40px), transition to previous chapter
       if (scrollY <= 40) {
@@ -6091,6 +6359,22 @@
       });
     }
 
+    const fsHudComicModeBtn = document.getElementById('fullscreen-hud-comic-mode-btn');
+    if (fsHudComicModeBtn) {
+      fsHudComicModeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cycleComicViewMode();
+      });
+    }
+
+    const fsHudComicFitBtn = document.getElementById('fullscreen-hud-comic-fit-btn');
+    if (fsHudComicFitBtn) {
+      fsHudComicFitBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cycleComicFitMode();
+      });
+    }
+
     const fsHudExitBtn = document.getElementById('fullscreen-hud-exit-btn');
     if (fsHudExitBtn) {
       fsHudExitBtn.addEventListener('click', (e) => {
@@ -6100,6 +6384,7 @@
     }
 
     const syncNativeFsExit = () => {
+      syncReaderViewportHeight();
       const isNativeFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
       if (!isNativeFs && state.nativeFullscreenEntered && state.readerFullscreen) {
         state.nativeFullscreenEntered = false;
@@ -6112,6 +6397,20 @@
     };
     document.addEventListener('fullscreenchange', syncNativeFsExit);
     document.addEventListener('webkitfullscreenchange', syncNativeFsExit);
+    window.addEventListener('resize', () => {
+      syncReaderViewportHeight();
+      if (state.readerFullscreen && isComicBookActive() && state.currentComicPages.length > 0) {
+        scheduleComicSvgRefresh();
+      }
+    });
+    window.addEventListener('orientationchange', () => {
+      setTimeout(() => {
+        syncReaderViewportHeight();
+        if (state.readerFullscreen && isComicBookActive() && state.currentComicPages.length > 0) {
+          scheduleComicSvgRefresh();
+        }
+      }, 150);
+    });
 
     const stylusOnlyCb = document.getElementById('eink-stylus-only-checkbox');
     if (stylusOnlyCb) {
