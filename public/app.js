@@ -496,19 +496,31 @@
 
   async function apiFetch(endpoint, options = {}) {
     const url = `${getApiBase()}${endpoint}`;
-    const res = await fetch(url, {
-      ...options,
-      headers: getApiHeaders(options.headers || {})
-    });
-    if (!res.ok) {
-      let errMsg = `HTTP ${res.status}`;
-      try {
-        const errData = await res.json();
-        if (errData && errData.error) errMsg = errData.error;
-      } catch (_) {}
-      throw new Error(errMsg);
+    const { timeoutMs = 20000, ...fetchOpts } = options;
+    let timerId = null;
+    let controller = null;
+    if (timeoutMs > 0 && !fetchOpts.signal && !fetchOpts.keepalive && typeof AbortController !== 'undefined') {
+      controller = new AbortController();
+      timerId = setTimeout(() => controller.abort(), timeoutMs);
     }
-    return await res.json();
+    try {
+      const res = await fetch(url, {
+        ...fetchOpts,
+        signal: fetchOpts.signal || (controller ? controller.signal : undefined),
+        headers: getApiHeaders(fetchOpts.headers || {})
+      });
+      if (!res.ok) {
+        let errMsg = `HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          if (errData && errData.error) errMsg = errData.error;
+        } catch (_) {}
+        throw new Error(errMsg);
+      }
+      return await res.json();
+    } finally {
+      if (timerId) clearTimeout(timerId);
+    }
   }
 
   // ==========================================================================
@@ -2115,32 +2127,33 @@
   // ==========================================================================
   // 6. Initialize & Load Library Books
   // ==========================================================================
+  async function probeNasHealthWithRetry() {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await apiFetch('/api/health', { timeoutMs: 6500 });
+        if (res && res.ok) return res;
+      } catch (_) {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 450));
+        }
+      }
+    }
+    return null;
+  }
+
   async function loadLibrary(page = state.currentPage, skipBackfillRefresh = false) {
     state.currentPage = page;
     const connDot = document.getElementById('conn-dot');
     const connText = document.getElementById('conn-status-text');
 
     let nasLoaded = false;
+    let syncResult = null;
     try {
-      // 1. Try connecting to NAS Backend API (/api/health & /api/books with pagination)
-      const health = await apiFetch('/api/health');
-      if (health && health.ok) {
+      // 1. Probe NAS Backend API (/api/health with wake-up retry on first check)
+      const healthOk = state.serverAvailable || Boolean(await probeNasHealthWithRetry());
+      if (healthOk) {
         state.serverAvailable = true;
         state.connectionMode = 'nas-server';
-
-        // Also load server-side saved WebDAV config if present
-        try {
-          const cfgRes = await apiFetch('/api/config');
-          if (cfgRes && cfgRes.ok && cfgRes.config) {
-            state.webdavConfig = {
-              ...state.webdavConfig,
-              enableWebdav: cfgRes.config.enableWebdav,
-              webdavUrl: cfgRes.config.webdavUrl || state.webdavConfig.webdavUrl,
-              webdavUsername: cfgRes.config.webdavUsername || state.webdavConfig.webdavUsername,
-              webdavBasePath: cfgRes.config.webdavBasePath || state.webdavConfig.webdavBasePath
-            };
-          }
-        } catch (_) {}
 
         const queryParams = new URLSearchParams({
           convert: state.settings.convertMode,
@@ -2155,13 +2168,36 @@
           q: state.searchQuery
         });
 
-        const booksRes = await apiFetch(`/api/books?${queryParams.toString()}`);
+        const cfgPromise = skipBackfillRefresh
+          ? Promise.resolve(null)
+          : apiFetch('/api/config', { timeoutMs: 6500 }).catch(() => null);
+        const booksPromise = apiFetch(`/api/books?${queryParams.toString()}`, { timeoutMs: 25000 });
+        const syncPromise = skipBackfillRefresh
+          ? Promise.resolve({ synced: false, pushedLocal: false })
+          : pullCloudSync(true, { skipRender: true });
+
+        const [cfgRes, booksRes, syncOutcome] = await Promise.all([
+          cfgPromise,
+          booksPromise,
+          syncPromise
+        ]);
+
+        if (cfgRes && cfgRes.ok && cfgRes.config) {
+          state.webdavConfig = {
+            ...state.webdavConfig,
+            enableWebdav: cfgRes.config.enableWebdav,
+            webdavUrl: cfgRes.config.webdavUrl || state.webdavConfig.webdavUrl,
+            webdavUsername: cfgRes.config.webdavUsername || state.webdavConfig.webdavUsername,
+            webdavBasePath: cfgRes.config.webdavBasePath || state.webdavConfig.webdavBasePath
+          };
+        }
 
         state.books = booksRes.books || [];
         state.totalBooksCount = booksRes.total || 0;
         state.totalPages = booksRes.totalPages || 1;
         state.folderCountsMap = booksRes.folders || {};
         state.statusCounts = booksRes.statusCounts || null;
+        syncResult = syncOutcome;
 
         connDot.classList.remove('offline');
         const countDisplay = (booksRes.totalAll || booksRes.total || 0).toLocaleString();
@@ -2173,7 +2209,6 @@
     }
 
     if (nasLoaded) {
-      const syncResult = await pullCloudSync(true, { skipRender: true });
       if (syncResult?.pushedLocal && !skipBackfillRefresh) {
         return loadLibrary(state.currentPage, true);
       }

@@ -144,10 +144,8 @@ function getProfileData(store, syncKey = 'default') {
 const VALID_PUB_STATUSES = new Set(['ongoing', 'completed', 'oneshot', 'hiatus']);
 const VALID_READ_STATUSES = new Set(['unread', 'reading', 'finished', 'dropped']);
 
-function deriveBookPubStatus(item, profile, bookId) {
-  const manual = profile?.bookStatus?.[bookId]?.pubStatus;
-  if (manual && VALID_PUB_STATUSES.has(manual)) return manual;
-  const target = `${item.folder || ''} ${item.filename || ''}`;
+function inferAutoPubStatus(folder, filename) {
+  const target = `${folder || ''} ${filename || ''}`;
   if (/完結|完结|完本|全本|全集|大結局|大结局|\(完\)|\[完\]|【完】/i.test(target)) {
     return 'completed';
   }
@@ -161,6 +159,13 @@ function deriveBookPubStatus(item, profile, bookId) {
     return 'hiatus';
   }
   return '';
+}
+
+function deriveBookPubStatus(item, profile, bookId) {
+  const manual = profile?.bookStatus?.[bookId]?.pubStatus;
+  if (manual && VALID_PUB_STATUSES.has(manual)) return manual;
+  if (item._autoPubStatus !== undefined) return item._autoPubStatus;
+  return (item._autoPubStatus = inferAutoPubStatus(item.folder, item.filename));
 }
 
 function deriveBookReadStatus(profile, bookId) {
@@ -201,6 +206,29 @@ function decodeBookId(bookId) {
  * Recursively scan local NAS mounted directory for .txt, .epub, .pdf, .mobi, .azw3, .cbz files
  */
 const SUPPORTED_EXTS = new Set(['.txt', '.epub', '.pdf', '.mobi', '.azw3', '.azw', '.cbz']);
+const INDEX_CACHE_FILE = path.join(DATA_DIR, 'library_index_cache.json');
+
+function buildLocalBookItem(baseDir, fullPath, entryName) {
+  const ext = path.extname(entryName).toLowerCase();
+  const relPath = path.relative(baseDir, fullPath).split(path.sep).join('/');
+  const dirName = path.dirname(relPath);
+  const folder = dirName === '.' ? '未分類書庫' : dirName;
+  const rawFormat = ext.slice(1);
+  const normalizedFormat = rawFormat === 'azw' || rawFormat === 'azw3' ? 'mobi' : rawFormat;
+  return {
+    source: 'local',
+    fullPath,
+    relativePath: relPath,
+    filename: entryName,
+    folder,
+    format: normalizedFormat,
+    size: 0,
+    mtime: '',
+    _id: encodeBookId('local', relPath),
+    _autoPubStatus: inferAutoPubStatus(folder, entryName),
+    searchKey: `${entryName} ${folder} ${relPath}`.toLowerCase()
+  };
+}
 
 function scanLocalNovels(dir, baseDir = dir, results = []) {
   if (!fs.existsSync(dir)) return results;
@@ -226,23 +254,51 @@ function scanLocalNovels(dir, baseDir = dir, results = []) {
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
       if (SUPPORTED_EXTS.has(ext)) {
-        const relPath = path.relative(baseDir, fullPath).split(path.sep).join('/');
-        const dirName = path.dirname(relPath);
-        const folder = dirName === '.' ? '未分類書庫' : dirName;
-        const rawFormat = ext.slice(1);
-        const normalizedFormat = rawFormat === 'azw' || rawFormat === 'azw3' ? 'mobi' : rawFormat;
-
-        results.push({
-          source: 'local',
-          fullPath,
-          relativePath: relPath,
-          filename: entry.name,
-          folder,
-          format: normalizedFormat,
-          size: 0,
-          mtime: ''
-        });
+        results.push(buildLocalBookItem(baseDir, fullPath, entry.name));
       }
+    }
+  }
+  return results;
+}
+
+async function scanLocalNovelsAsync(baseDir) {
+  const results = [];
+  if (!fs.existsSync(baseDir)) return results;
+
+  const stack = [baseDir];
+  let dirsProcessed = 0;
+
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (
+        entry.name.startsWith('.') ||
+        entry.name === '@eaDir' ||
+        entry.name === '#recycle'
+      ) {
+        continue;
+      }
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (SUPPORTED_EXTS.has(ext)) {
+          results.push(buildLocalBookItem(baseDir, fullPath, entry.name));
+        }
+      }
+    }
+
+    dirsProcessed++;
+    if (dirsProcessed % 20 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
   return results;
@@ -343,17 +399,86 @@ app.get('/api/health', (req, res) => {
 // Global cached file index for high-speed response with 50,000+ novels
 let cachedNovelsIndex = null;
 let lastScanTime = 0;
-const SCAN_CACHE_TTL_MS = 30 * 60 * 1000; // Cache index for 30 minutes
+let activeScanPromise = null;
+const SCAN_CACHE_TTL_MS = 30 * 60 * 1000; // Refresh index in background every 30 minutes
 
-function getCachedNovelsList() {
+function loadDiskIndexCache() {
+  try {
+    if (!fs.existsSync(INDEX_CACHE_FILE)) return false;
+    const raw = JSON.parse(fs.readFileSync(INDEX_CACHE_FILE, 'utf8'));
+    if (raw && raw.novelsDir === NOVELS_DIR && Array.isArray(raw.items)) {
+      cachedNovelsIndex = raw.items.map((item) => ({
+        ...item,
+        fullPath: path.join(NOVELS_DIR, item.relativePath),
+        _id: item._id || encodeBookId('local', item.relativePath),
+        _autoPubStatus:
+          item._autoPubStatus !== undefined
+            ? item._autoPubStatus
+            : inferAutoPubStatus(item.folder, item.filename),
+        searchKey: item.searchKey || `${item.filename} ${item.folder} ${item.relativePath}`.toLowerCase()
+      }));
+      lastScanTime = raw.scannedAt || 0;
+      console.log(`[Cache] Loaded ${cachedNovelsIndex.length} novels from disk index cache.`);
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+function saveDiskIndexCache(items) {
+  try {
+    const slimItems = items.map((item) => ({
+      source: item.source,
+      relativePath: item.relativePath,
+      filename: item.filename,
+      folder: item.folder,
+      format: item.format,
+      _id: item._id,
+      _autoPubStatus: item._autoPubStatus
+    }));
+    fs.writeFile(
+      INDEX_CACHE_FILE,
+      JSON.stringify({
+        novelsDir: NOVELS_DIR,
+        scannedAt: Date.now(),
+        items: slimItems
+      }),
+      'utf8',
+      () => {}
+    );
+  } catch (_) {}
+}
+
+function refreshNovelsIndexInBackground() {
+  if (activeScanPromise) return activeScanPromise;
+  activeScanPromise = (async () => {
+    try {
+      console.log(`[Cache] Async scanning novels directory: ${NOVELS_DIR}`);
+      const scanned = await scanLocalNovelsAsync(NOVELS_DIR);
+      cachedNovelsIndex = scanned;
+      lastScanTime = Date.now();
+      console.log(`[Cache] Indexed ${cachedNovelsIndex.length} novels.`);
+      saveDiskIndexCache(scanned);
+      return scanned;
+    } finally {
+      activeScanPromise = null;
+    }
+  })();
+  return activeScanPromise;
+}
+
+async function getCachedNovelsListAsync() {
   const now = Date.now();
-  if (!cachedNovelsIndex || now - lastScanTime > SCAN_CACHE_TTL_MS) {
-    console.log(`[Cache] Scanning novels directory: ${NOVELS_DIR}`);
-    cachedNovelsIndex = scanLocalNovels(NOVELS_DIR);
-    lastScanTime = now;
-    console.log(`[Cache] Indexed ${cachedNovelsIndex.length} novels.`);
+  if (!cachedNovelsIndex) {
+    loadDiskIndexCache();
   }
-  return cachedNovelsIndex;
+  if (cachedNovelsIndex) {
+    if (now - lastScanTime > SCAN_CACHE_TTL_MS) {
+      refreshNovelsIndexInBackground().catch(() => {});
+    }
+    return cachedNovelsIndex;
+  }
+  return await refreshNovelsIndexInBackground();
 }
 
 /**
@@ -375,7 +500,7 @@ app.get('/api/books', async (req, res) => {
     const syncStore = loadSyncStore();
     const profile = getProfileData(syncStore, syncKey);
 
-    const localFiles = getCachedNovelsList();
+    const localFiles = await getCachedNovelsListAsync();
     let allFiles = localFiles;
 
     // Optional WebDAV addition if enabled
@@ -718,8 +843,16 @@ app.post('/api/books/upload', (req, res) => {
     const buffer = Buffer.from(base64Data, 'base64');
     fs.writeFileSync(targetPath, buffer);
 
-    // Invalidate index cache so newly uploaded book appears immediately
-    cachedNovelsIndex = null;
+    // Update index incrementally so newly uploaded book appears immediately without full 50k+ rescan
+    const uploadedItem = buildLocalBookItem(NOVELS_DIR, targetPath, safeFilename);
+    if (Array.isArray(cachedNovelsIndex)) {
+      const existingIdx = cachedNovelsIndex.findIndex((x) => x._id === uploadedItem._id);
+      if (existingIdx >= 0) cachedNovelsIndex[existingIdx] = uploadedItem;
+      else cachedNovelsIndex.unshift(uploadedItem);
+      saveDiskIndexCache(cachedNovelsIndex);
+    } else {
+      refreshNovelsIndexInBackground().catch(() => {});
+    }
 
     res.json({
       ok: true,
@@ -977,4 +1110,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`📂 本機 NAS 掛載書庫路徑: ${NOVELS_DIR}`);
   console.log(`💾 閱讀紀錄同步儲存路徑: ${DATA_DIR}`);
   console.log(`====================================================`);
+  loadDiskIndexCache();
+  refreshNovelsIndexInBackground().catch(() => {});
 });
