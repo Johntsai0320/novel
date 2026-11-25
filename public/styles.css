@@ -1202,6 +1202,8 @@ button {
 
 .reader-view.active {
   display: block;
+  overflow-x: clip;
+  max-width: 100%;
 }
 
 /* Sticky Top Reader Bar */
@@ -1814,8 +1816,44 @@ button {
     width: 84px;
     height: 116px;
   }
+  .reader-topbar {
+    padding: 0.35rem 0.6rem;
+    max-width: 100%;
+  }
+  .reader-topbar-inner {
+    flex-wrap: wrap;
+    gap: 0.32rem;
+  }
+  .reader-nav-left {
+    flex: 1 1 100%;
+    min-width: 0;
+    gap: 0.45rem;
+  }
+  .reader-actions {
+    width: 100%;
+    max-width: 100%;
+    flex-wrap: wrap;
+    gap: 0.28rem;
+    justify-content: flex-start;
+  }
+  .reader-actions .btn {
+    padding: 0.22rem 0.44rem;
+    font-size: 0.73rem;
+  }
+  .settings-popover {
+    top: 108px;
+    max-height: calc(100vh - 122px);
+    max-height: calc(100dvh - 122px);
+  }
+  body.reader-fullscreen .settings-popover {
+    top: 3.1rem;
+    max-height: calc(100dvh - 64px);
+  }
   .reader-canvas-wrapper {
     padding: 1.6rem 1.15rem calc(5.5rem + var(--eink-bottom-safe, 0px) + env(safe-area-inset-bottom, 0px));
+  }
+  .reader-canvas-wrapper.vertical-mode {
+    padding: 1.15rem 1rem calc(2.75rem + env(safe-area-inset-bottom, 0px));
   }
   .hide-on-mobile {
     display: none;
@@ -2625,5 +2663,127 @@ body.reader-fullscreen .toast-container {
   bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
 }
 
+/* ==========================================================================
+   Jump-to-Page Popover & Comic Inline Page Jump Controls
+   ========================================================================== */
 
+.fullscreen-hud-info {
+  cursor: pointer;
+}
 
+.comic-pager-jump-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.comic-pager-jump-input {
+  width: 64px;
+  padding: 0.28rem 0.45rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  text-align: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.jump-page-popover {
+  z-index: 105;
+  width: 320px;
+}
+
+body.reader-fullscreen .jump-page-popover {
+  top: 3.1rem;
+  right: 0.55rem;
+}
+
+.jump-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.jump-page-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.jump-page-context {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  margin-top: 0.15rem;
+}
+
+.jump-page-close-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78rem;
+  min-height: 0 !important;
+}
+
+.jump-page-mono {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.jump-page-slider {
+  width: 100%;
+  margin-bottom: 0.55rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.jump-page-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.jump-page-number-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  text-align: center;
+}
+
+.jump-page-presets {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.jump-preset-btn {
+  padding: 0.35rem 0.25rem;
+  font-size: 0.75rem;
+}
+
+.jump-chapter-row {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.jump-page-hint {
+  margin-top: 0.65rem;
+  font-size: 0.71rem;
+}
+
+body.eink-mode .jump-page-popover {
+  box-shadow: none !important;
+  border: 2px solid #000000;
+}
+
+@media (max-width: 768px) {
+  .chapter-footer-nav {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+}

@@ -372,6 +372,15 @@
 
           <button
             type="button"
+            id="reader-jump-page-btn"
+            class="btn"
+            title="翻頁到指定頁面或章節 (G)"
+          >
+            🔢 <span id="reader-jump-page-text">跳頁</span>
+          </button>
+
+          <button
+            type="button"
             id="reader-settings-btn"
             class="btn"
             title="字體大小、直橫排、行距與護眼/夜間主題設定"
@@ -649,11 +658,84 @@
       </div>
     </aside>
 
+    <!-- Jump-to-Page & Chapter Popover (小說／漫畫指定頁碼跳轉面板) -->
+    <aside id="jump-page-popover" class="settings-popover jump-page-popover" role="dialog" aria-label="翻頁到指定頁面">
+      <div class="jump-page-header">
+        <div>
+          <div class="jump-page-title">🔢 翻頁到指定頁面</div>
+          <div id="jump-page-context-label" class="jump-page-context">小說閱讀 · 第 1 / 1 頁</div>
+        </div>
+        <button type="button" id="close-jump-page-btn" class="btn jump-page-close-btn" title="關閉 (Esc)">✕</button>
+      </div>
+
+      <div class="setting-row">
+        <div class="setting-label">
+          <span>指定頁碼</span>
+          <span id="jump-page-range-label" class="jump-page-mono">1 / 1 頁</span>
+        </div>
+        <input
+          type="range"
+          id="jump-page-slider"
+          class="jump-page-slider"
+          min="1"
+          max="1"
+          value="1"
+          aria-label="頁碼滑桿"
+        />
+        <form id="jump-page-form" class="jump-page-input-row">
+          <input
+            type="number"
+            id="jump-page-input"
+            class="form-input jump-page-number-input"
+            inputmode="numeric"
+            min="1"
+            max="1"
+            value="1"
+            placeholder="輸入頁碼"
+            aria-label="輸入目標頁碼"
+          />
+          <button type="submit" id="jump-page-submit-btn" class="btn btn-primary">前往頁碼</button>
+        </form>
+        <div class="jump-page-presets">
+          <button type="button" class="btn jump-preset-btn" data-jump-preset="first">首頁</button>
+          <button type="button" class="btn jump-preset-btn" data-jump-preset="-5">-5 頁</button>
+          <button type="button" class="btn jump-preset-btn" data-jump-preset="+5">+5 頁</button>
+          <button type="button" class="btn jump-preset-btn" data-jump-preset="last">末頁</button>
+        </div>
+      </div>
+
+      <div id="jump-chapter-row" class="setting-row jump-chapter-row">
+        <div class="setting-label">
+          <span id="jump-chapter-title-label">切換章節</span>
+          <span id="jump-chapter-range-label" class="jump-page-mono">1 / 1 章</span>
+        </div>
+        <form id="jump-chapter-form" class="jump-page-input-row">
+          <input
+            type="number"
+            id="jump-chapter-input"
+            class="form-input jump-page-number-input"
+            inputmode="numeric"
+            min="1"
+            max="1"
+            value="1"
+            placeholder="輸入章節"
+            aria-label="輸入目標章節"
+          />
+          <button type="submit" id="jump-chapter-submit-btn" class="btn">前往章節</button>
+        </form>
+      </div>
+
+      <div class="form-hint jump-page-hint">
+        💡 按鍵盤 <code>G</code> 快速開啟／關閉；輸入頁碼後按 <code>Enter</code> 立即跳轉。
+      </div>
+    </aside>
+
     <!-- Floating Immersive Fullscreen Exit & Status HUD -->
     <div id="fullscreen-floating-hud" class="fullscreen-floating-hud" aria-label="全螢幕閱讀控制列">
       <button type="button" id="fullscreen-hud-comic-mode-btn" class="btn fullscreen-hud-action-btn" style="display: none;" title="切換漫畫模式：條漫 / 單頁 / 雙頁">📜 條漫</button>
       <button type="button" id="fullscreen-hud-comic-fit-btn" class="btn fullscreen-hud-action-btn" style="display: none;" title="切換圖片縮放：適寬 / 整頁 / 原寸">📐 適寬</button>
-      <span id="fullscreen-hud-info" class="fullscreen-hud-info"></span>
+      <span id="fullscreen-hud-info" class="fullscreen-hud-info" title="點擊開啟指定頁面跳轉"></span>
+      <button type="button" id="fullscreen-hud-jump-btn" class="btn fullscreen-hud-action-btn" title="翻頁到指定頁面 (G)">🔢 跳頁</button>
       <button type="button" id="fullscreen-hud-exit-btn" class="btn fullscreen-hud-exit-btn" title="退出全螢幕並恢復上方工具列 (Esc)">✕ 退出全螢幕</button>
     </div>
 
@@ -676,6 +758,7 @@
       <nav class="chapter-footer-nav" aria-label="章節切換導覽">
         <button type="button" id="prev-chapter-btn" class="btn">← 上一章</button>
         <button type="button" id="footer-toc-btn" class="btn">📑 章節目錄</button>
+        <button type="button" id="footer-jump-page-btn" class="btn" title="翻頁到指定頁面或章節 (G)">🔢 指定頁碼</button>
         <button type="button" id="next-chapter-btn" class="btn btn-primary">下一章 →</button>
       </nav>
     </article>

@@ -345,12 +345,39 @@
     return 0;
   }
 
+  function getEffectiveViewportHeight() {
+    const innerH = window.innerHeight || document.documentElement.clientHeight || 0;
+    const vvH =
+      window.visualViewport && window.visualViewport.height > 0
+        ? Math.round(window.visualViewport.height)
+        : 0;
+    if (innerH > 0 && vvH > 0) return Math.min(innerH, vvH);
+    return innerH || vvH || 800;
+  }
+
+  function getEffectiveTopSafePx() {
+    if (state.readerFullscreen) return 0;
+    const topbar = document.getElementById('reader-topbar');
+    if (!topbar || topbar.classList.contains('hidden-bar')) return 0;
+    const rect = topbar.getBoundingClientRect();
+    if (rect.height <= 0 || rect.bottom <= 0) return 0;
+    return Math.max(0, Math.round(rect.bottom));
+  }
+
+  function getHorizontalReadingMetrics() {
+    const viewportHeight = getEffectiveViewportHeight();
+    const topSafePx = getEffectiveTopSafePx();
+    const bottomSafePx = getEffectiveBottomSafePx();
+    const visibleHeight = Math.max(200, viewportHeight - topSafePx - bottomSafePx);
+    return { viewportHeight, topSafePx, bottomSafePx, visibleHeight };
+  }
+
   function getScrollBehavior() {
     return isEinkActive() ? 'instant' : 'smooth';
   }
 
   function getPageFlipOverlapRatio() {
-    return isEinkActive() ? 0.84 : 0.85;
+    return 0.82;
   }
 
   function formatTurnerKeyLabel(e) {
@@ -3567,6 +3594,86 @@
     return ratio >= 0.35 ? 'next' : 'prev';
   }
 
+  function parseTargetPageNumber(rawInput, totalPages) {
+    const total = Math.max(0, Math.floor(Number(totalPages) || 0));
+    if (total <= 0) return { valid: false, error: '目前無可用頁面' };
+    const str = String(rawInput ?? '').trim();
+    if (!str || !/^-?\d+(\.\d+)?$/.test(str)) {
+      return { valid: false, error: '請輸入有效頁碼數字' };
+    }
+    const num = Math.floor(Number(str));
+    if (!Number.isFinite(num)) {
+      return { valid: false, error: '請輸入有效頁碼數字' };
+    }
+    const clamped = Math.max(1, Math.min(total, num));
+    return { valid: true, page: clamped, clamped: clamped !== num };
+  }
+
+  function computeNovelPagination(scrolled, maxScroll, viewportSize, overlapRatio = 0.88) {
+    const safeMax = Math.max(0, Number(maxScroll) || 0);
+    const step = Math.max(160, Math.floor(Math.max(1, Number(viewportSize) || 1) * overlapRatio));
+    if (safeMax <= 40) {
+      return { currentPage: 1, totalPages: 1, step, maxScroll: safeMax };
+    }
+    const totalPages = Math.floor((safeMax - 41) / step) + 2;
+    const pos = Math.max(0, Number(scrolled) || 0);
+    const currentPage =
+      pos >= safeMax - 40
+        ? totalPages
+        : Math.min(totalPages - 1, Math.max(1, Math.floor((pos + 20) / step) + 1));
+    return { currentPage, totalPages, step, maxScroll: safeMax };
+  }
+
+  function computeNovelPageTargetScroll(targetPage, maxScroll, viewportSize, overlapRatio = 0.88) {
+    const safeMax = Math.max(0, Number(maxScroll) || 0);
+    const step = Math.max(160, Math.floor(Math.max(1, Number(viewportSize) || 1) * overlapRatio));
+    const totalPages = safeMax <= 40 ? 1 : Math.floor((safeMax - 41) / step) + 2;
+    const clampedPage = Math.max(1, Math.min(totalPages, Math.floor(Number(targetPage) || 1)));
+    if (totalPages <= 1 || clampedPage <= 1) {
+      return { page: 1, totalPages, targetScroll: 0 };
+    }
+    if (clampedPage >= totalPages) {
+      return { page: totalPages, totalPages, targetScroll: safeMax };
+    }
+    return {
+      page: clampedPage,
+      totalPages,
+      targetScroll: Math.min(safeMax, (clampedPage - 1) * step)
+    };
+  }
+
+  function computeComicScrollPageIndex(pagesRects, viewportTopThreshold = 40) {
+    if (!Array.isArray(pagesRects) || pagesRects.length === 0) return 1;
+    for (let i = 0; i < pagesRects.length; i++) {
+      if (pagesRects[i].bottom > viewportTopThreshold) {
+        return i + 1;
+      }
+    }
+    return pagesRects.length;
+  }
+
+  function resolveComicJumpTarget(targetPage, totalPages, comicMode = 'scroll') {
+    const total = Math.max(1, Math.floor(Number(totalPages) || 1));
+    const clampedPage = Math.max(1, Math.min(total, Math.floor(Number(targetPage) || 1)));
+    const rawIdx = clampedPage - 1;
+    if (comicMode === 'double') {
+      const spreadIdx = rawIdx - (rawIdx % 2);
+      const endPage = Math.min(total, spreadIdx + 2);
+      return {
+        mode: 'double',
+        page: clampedPage,
+        pageIndex: spreadIdx,
+        displayLabel: spreadIdx + 1 === endPage ? `${spreadIdx + 1}` : `${spreadIdx + 1}-${endPage}`
+      };
+    }
+    return {
+      mode: comicMode,
+      page: clampedPage,
+      pageIndex: rawIdx,
+      displayLabel: `${clampedPage}`
+    };
+  }
+
   function getVisibleComicPageRects() {
     const wraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
     const rects = [];
@@ -3575,6 +3682,238 @@
       rects.push({ top: r.top, bottom: r.bottom, height: r.height });
     });
     return rects;
+  }
+
+  function getCurrentReaderPaginationInfo() {
+    const totalChapters = Math.max(1, state.currentBook?.totalChapters || 1);
+    const currentChapter = (state.currentChapter?.index || 0) + 1;
+
+    if (isComicBookActive() && state.currentComicPages.length > 0) {
+      const totalPages = state.currentComicPages.length;
+      const mode = state.settings.comicMode || 'scroll';
+      const modeLabel =
+        mode === 'double' ? '雙頁漫畫' : mode === 'single' ? '單頁漫畫' : '條漫模式';
+      let currentPage = 1;
+      let displayPageLabel = '1';
+      if (mode === 'scroll') {
+        currentPage = computeComicScrollPageIndex(getVisibleComicPageRects(), 40);
+        displayPageLabel = `${currentPage}`;
+      } else {
+        currentPage = Math.min(totalPages, Math.max(1, (state.comicCurrentPage || 0) + 1));
+        if (mode === 'double' && state.comicCurrentPage + 1 < totalPages) {
+          displayPageLabel = `${state.comicCurrentPage + 1}-${state.comicCurrentPage + 2}`;
+        } else {
+          displayPageLabel = `${currentPage}`;
+        }
+      }
+      return {
+        isComic: true,
+        comicMode: mode,
+        modeLabel,
+        currentPage,
+        totalPages,
+        displayPageLabel,
+        currentChapter,
+        totalChapters
+      };
+    }
+
+    const overlapRatio = getPageFlipOverlapRatio();
+    if (isVerticalMode()) {
+      const { scrolled, maxScroll, viewportSize } = getVerticalScrollInfo();
+      const info = computeNovelPagination(scrolled, maxScroll, viewportSize, overlapRatio);
+      return {
+        isComic: false,
+        modeLabel: '小說直排',
+        currentPage: info.currentPage,
+        totalPages: info.totalPages,
+        displayPageLabel: `${info.currentPage}`,
+        maxScroll: info.maxScroll,
+        viewportSize,
+        overlapRatio,
+        currentChapter,
+        totalChapters
+      };
+    }
+
+    const { viewportHeight, visibleHeight } = getHorizontalReadingMetrics();
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const maxScroll = Math.max(0, document.documentElement.scrollHeight - viewportHeight);
+    const info = computeNovelPagination(scrollY, maxScroll, visibleHeight, overlapRatio);
+    return {
+      isComic: false,
+      modeLabel: '小說橫排',
+      currentPage: info.currentPage,
+      totalPages: info.totalPages,
+      displayPageLabel: `${info.currentPage}`,
+      maxScroll: info.maxScroll,
+      viewportSize: visibleHeight,
+      overlapRatio,
+      currentChapter,
+      totalChapters
+    };
+  }
+
+  function updateReaderPageIndicator() {
+    const textEl = document.getElementById('reader-jump-page-text');
+    if (!textEl || !state.currentBook) return;
+    const info = getCurrentReaderPaginationInfo();
+    textEl.textContent = `${info.displayPageLabel}/${info.totalPages} 頁`;
+  }
+
+  function syncJumpPagePopoverUI() {
+    const popover = document.getElementById('jump-page-popover');
+    if (!popover || !state.currentBook) return;
+    const info = getCurrentReaderPaginationInfo();
+
+    const contextEl = document.getElementById('jump-page-context-label');
+    if (contextEl) {
+      contextEl.textContent = `${info.modeLabel} · 第 ${info.displayPageLabel} / ${info.totalPages} 頁`;
+    }
+
+    const rangeEl = document.getElementById('jump-page-range-label');
+    if (rangeEl) {
+      rangeEl.textContent = `${info.displayPageLabel} / ${info.totalPages} 頁`;
+    }
+
+    const slider = document.getElementById('jump-page-slider');
+    if (slider) {
+      slider.min = '1';
+      slider.max = String(info.totalPages);
+      slider.value = String(info.currentPage);
+      slider.disabled = info.totalPages <= 1;
+    }
+
+    const input = document.getElementById('jump-page-input');
+    if (input && document.activeElement !== input) {
+      input.min = '1';
+      input.max = String(info.totalPages);
+      input.value = String(info.currentPage);
+    }
+
+    const chRow = document.getElementById('jump-chapter-row');
+    if (chRow) {
+      chRow.style.display = info.totalChapters > 1 ? '' : 'none';
+    }
+    const chTitleLabel = document.getElementById('jump-chapter-title-label');
+    if (chTitleLabel) {
+      chTitleLabel.textContent = info.isComic ? '切換話數' : '切換章節';
+    }
+    const chRangeLabel = document.getElementById('jump-chapter-range-label');
+    if (chRangeLabel) {
+      chRangeLabel.textContent = info.isComic
+        ? `${info.currentChapter} / ${info.totalChapters} 話`
+        : `${info.currentChapter} / ${info.totalChapters} 章`;
+    }
+    const chInput = document.getElementById('jump-chapter-input');
+    if (chInput && document.activeElement !== chInput) {
+      chInput.min = '1';
+      chInput.max = String(info.totalChapters);
+      chInput.value = String(info.currentChapter);
+    }
+  }
+
+  function openJumpPagePopover() {
+    const popover = document.getElementById('jump-page-popover');
+    if (!popover || !state.currentBook) return;
+    document.getElementById('reader-settings-popover')?.classList.remove('open');
+    syncJumpPagePopoverUI();
+    popover.classList.add('open');
+    const input = document.getElementById('jump-page-input');
+    if (input) {
+      requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    }
+  }
+
+  function closeJumpPagePopover() {
+    document.getElementById('jump-page-popover')?.classList.remove('open');
+  }
+
+  function toggleJumpPagePopover() {
+    const popover = document.getElementById('jump-page-popover');
+    if (!popover) return;
+    if (popover.classList.contains('open')) {
+      closeJumpPagePopover();
+    } else {
+      openJumpPagePopover();
+    }
+  }
+
+  function jumpToReaderPage(rawPageInput, options = {}) {
+    if (!state.currentBook || !state.currentChapter) return false;
+    const info = getCurrentReaderPaginationInfo();
+    const parsed = parseTargetPageNumber(rawPageInput, info.totalPages);
+    if (!parsed.valid) {
+      showToast(parsed.error);
+      return false;
+    }
+
+    if (info.isComic) {
+      const mode = state.settings.comicMode || 'scroll';
+      const resolved = resolveComicJumpTarget(parsed.page, info.totalPages, mode);
+      if (mode === 'scroll') {
+        const wraps = document.querySelectorAll('#chapter-body .comic-page-wrapper');
+        const targetWrap = wraps[resolved.pageIndex];
+        if (targetWrap) {
+          const rect = targetWrap.getBoundingClientRect();
+          const targetY = Math.max(0, Math.round((window.scrollY || window.pageYOffset || 0) + rect.top));
+          window.scrollTo({ top: targetY, behavior: 'instant' });
+        }
+        requestAnimationFrame(() => {
+          updateScrollRibbon();
+          syncJumpPagePopoverUI();
+          scheduleProgressSync();
+        });
+      } else {
+        goToComicPage(resolved.pageIndex);
+        syncJumpPagePopoverUI();
+      }
+      if (!options.silent) {
+        showToast(`📄 已翻至第 ${resolved.displayLabel} / ${info.totalPages} 頁`);
+      }
+      if (options.closePopover !== false) closeJumpPagePopover();
+      return true;
+    }
+
+    const target = computeNovelPageTargetScroll(
+      parsed.page,
+      info.maxScroll,
+      info.viewportSize,
+      info.overlapRatio
+    );
+    if (isVerticalMode()) {
+      scrollVerticalTo(target.targetScroll, 'instant');
+    } else {
+      window.scrollTo({ top: target.targetScroll, behavior: 'instant' });
+    }
+    requestAnimationFrame(() => {
+      updateScrollRibbon();
+      syncJumpPagePopoverUI();
+      scheduleProgressSync();
+    });
+    if (!options.silent) {
+      showToast(`📄 已翻至第 ${target.page} / ${target.totalPages} 頁`);
+    }
+    if (options.closePopover !== false) closeJumpPagePopover();
+    return true;
+  }
+
+  async function jumpToReaderChapter(rawChapterInput) {
+    if (!state.currentBook) return false;
+    const totalChapters = Math.max(1, state.currentBook.totalChapters || 1);
+    const parsed = parseTargetPageNumber(rawChapterInput, totalChapters);
+    if (!parsed.valid) {
+      showToast(parsed.error);
+      return false;
+    }
+    closeJumpPagePopover();
+    await loadAndRenderChapter(parsed.page - 1, 0);
+    const unit = isComicBookActive() ? '話' : '章';
+    showToast(`📑 已跳轉至第 ${parsed.page} / ${totalChapters} ${unit}`);
+    return true;
   }
 
   function setComicMode(newMode) {
@@ -3811,6 +4150,9 @@
         <button type="button" class="btn comic-btn-sm ${state.readerFullscreen ? 'btn-pill-active' : ''}" id="comic-banner-fullscreen-btn" title="全螢幕滿版閱讀（隱藏工具列與標題，適合看漫畫）">
           ⛶ 全螢幕
         </button>
+        <button type="button" class="btn comic-btn-sm" id="comic-banner-jump-btn" title="翻頁到指定頁面 (G)">
+          🔢 跳頁
+        </button>
         <span class="comic-toolbar-info" style="font-family: var(--font-mono); margin-left: 0.25rem;">${pageSummary}</span>
       </div>
     `;
@@ -3832,6 +4174,10 @@
     banner.querySelector('#comic-banner-fullscreen-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleReaderFullscreen();
+    });
+    banner.querySelector('#comic-banner-jump-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleJumpPagePopover();
     });
 
     bodyEl.appendChild(banner);
@@ -3940,7 +4286,7 @@
         ? '點擊翻頁已關閉'
         : '點擊右側畫面下一頁';
 
-    // Bottom Pager Control Bar with Range Slider
+    // Bottom Pager Control Bar with Range Slider & Direct Jump Input
     const pagerBar = document.createElement('div');
     pagerBar.className = 'comic-pager-bar';
     pagerBar.innerHTML = `
@@ -3950,6 +4296,12 @@
         pages.length - 1
       )}" value="${state.comicCurrentPage}" aria-label="漫畫頁數滑桿" />
       <span class="comic-pager-status">${pageSummary}</span>
+      <form class="comic-pager-jump-group" id="comic-pager-jump-form">
+        <input type="number" class="comic-pager-jump-input" id="comic-pager-jump-input" inputmode="numeric" min="1" max="${pages.length}" value="${
+          state.comicCurrentPage + 1
+        }" aria-label="指定漫畫頁碼" title="輸入頁碼後按 Enter" />
+        <button type="submit" class="btn comic-btn-sm" id="comic-pager-jump-btn">跳頁</button>
+      </form>
       <button type="button" class="btn btn-primary comic-btn-sm" id="comic-next-page-btn">下一頁</button>
       <div class="comic-pager-hint">
         ${
@@ -3976,10 +4328,20 @@
       if (statusEl) {
         statusEl.textContent = `第 ${idx + 1} / ${pages.length} 頁`;
       }
+      const jumpIn = pagerBar.querySelector('#comic-pager-jump-input');
+      if (jumpIn) jumpIn.value = String(idx + 1);
     });
     slider.addEventListener('change', (e) => {
       const idx = parseInt(e.target.value, 10) || 0;
       goToComicPage(idx);
+    });
+    const pagerJumpForm = pagerBar.querySelector('#comic-pager-jump-form');
+    const pagerJumpInput = pagerBar.querySelector('#comic-pager-jump-input');
+    pagerJumpInput?.addEventListener('click', (e) => e.stopPropagation());
+    pagerJumpForm?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      jumpToReaderPage(pagerJumpInput?.value, { closePopover: false });
     });
 
     stage.appendChild(pagerBar);
@@ -4342,6 +4704,7 @@
     applyReaderSettingsToDOM();
     document.getElementById('reader-view').classList.remove('active');
     document.getElementById('reader-settings-popover').classList.remove('open');
+    closeJumpPagePopover();
     closeDrawer();
     document.getElementById('library-view').style.display = 'block';
     renderLibrary();
@@ -4360,7 +4723,9 @@
     const canvasEl = document.getElementById('reader-canvas');
     if (!canvasEl) return { scrolled: 0, maxScroll: 0, viewportSize: 1 };
     const maxScroll = Math.max(0, canvasEl.scrollWidth - canvasEl.clientWidth);
-    const viewportSize = Math.max(1, canvasEl.clientWidth);
+    const cs = window.getComputedStyle ? window.getComputedStyle(canvasEl) : null;
+    const padX = cs ? (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) : 0;
+    const viewportSize = Math.max(160, Math.floor(canvasEl.clientWidth - padX));
     if (maxScroll <= 0) {
       return { scrolled: 0, maxScroll: 0, viewportSize };
     }
@@ -4400,6 +4765,10 @@
     const pct = calculateCurrentScrollPercent();
     const fill = document.getElementById('reader-ribbon-fill');
     if (fill) fill.style.width = `${pct}%`;
+    updateReaderPageIndicator();
+    if (document.getElementById('jump-page-popover')?.classList.contains('open')) {
+      syncJumpPagePopoverUI();
+    }
     if (state.readerFullscreen) updateFullscreenHUDInfo();
   }
 
@@ -5171,7 +5540,8 @@
       return;
     }
     if (state.currentChapter && state.currentBook) {
-      infoEl.textContent = `${state.currentChapter.index + 1} / ${state.currentBook.totalChapters} 章`;
+      const info = getCurrentReaderPaginationInfo();
+      infoEl.textContent = `${info.currentChapter}/${info.totalChapters} 章 · ${info.displayPageLabel}/${info.totalPages} 頁`;
       return;
     }
     infoEl.textContent = '全螢幕閱讀';
@@ -5192,6 +5562,7 @@
 
     if (next) {
       document.getElementById('reader-settings-popover')?.classList.remove('open');
+      closeJumpPagePopover();
       closeDrawer();
       updateFullscreenHUDInfo();
       const rootEl = document.documentElement;
@@ -5394,6 +5765,14 @@
     updateComicModeUI();
     updateGlobalConvertButtonUI();
     updateEinkAndTurnerUI();
+    if (document.getElementById('reader-view')?.classList.contains('active')) {
+      requestAnimationFrame(() => {
+        updateReaderPageIndicator();
+        if (document.getElementById('jump-page-popover')?.classList.contains('open')) {
+          syncJumpPagePopoverUI();
+        }
+      });
+    }
   }
 
   function setWritingMode(newMode) {
@@ -5432,8 +5811,10 @@
         updateScrollRibbon();
         setTimeout(() => {
           state.isRestoringScroll = false;
+          updateReaderPageIndicator();
+          if (state.readerFullscreen) updateFullscreenHUDInfo();
           scheduleProgressSync();
-        }, 120);
+        }, 280);
       });
     }
   }
@@ -5653,6 +6034,13 @@
       }
 
       if (!document.getElementById('reader-view').classList.contains('active')) return;
+      if (e.key === 'Escape') {
+        const jumpPopover = document.getElementById('jump-page-popover');
+        if (jumpPopover && jumpPopover.classList.contains('open')) {
+          closeJumpPagePopover();
+          return;
+        }
+      }
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
       if (e.key === 'Escape') {
@@ -5662,12 +6050,19 @@
         }
         closeDrawer();
         document.getElementById('reader-settings-popover').classList.remove('open');
+        closeJumpPagePopover();
         return;
       }
 
       if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         toggleReaderFullscreen();
+        return;
+      }
+
+      if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        toggleJumpPagePopover();
         return;
       }
 
@@ -5851,16 +6246,15 @@
         return;
       }
 
+      const { viewportHeight, visibleHeight } = getHorizontalReadingMetrics();
       const scrollY = window.scrollY || window.pageYOffset;
-      const viewportHeight = window.innerHeight;
-      const usableViewport = Math.max(240, viewportHeight - getEffectiveBottomSafePx());
       const totalHeight = document.documentElement.scrollHeight;
       const maxScroll = Math.max(0, totalHeight - viewportHeight);
 
       if (isComicBookActive() && !isComicPagedMode()) {
         const res = computeComicScrollTarget(
           getVisibleComicPageRects(),
-          usableViewport,
+          visibleHeight,
           scrollY,
           maxScroll,
           'next',
@@ -5891,8 +6285,8 @@
           showToast('已是全書最後一章');
         }
       } else {
-        // Page down by usable viewport ratio (avoids text sitting under EInkBro bottom toolbar)
-        const step = Math.max(160, Math.floor(usableViewport * overlapRatio));
+        // Page down by visible reading area (excludes sticky topbar & EInkBro bottom toolbar)
+        const step = Math.max(160, Math.floor(visibleHeight * overlapRatio));
         const target = Math.min(maxScroll, scrollY + step);
         window.scrollTo({ top: target, behavior: scrollBehavior });
       }
@@ -5918,15 +6312,14 @@
         return;
       }
 
+      const { viewportHeight, visibleHeight } = getHorizontalReadingMetrics();
       const scrollY = window.scrollY || window.pageYOffset;
-      const viewportHeight = window.innerHeight;
-      const usableViewport = Math.max(240, viewportHeight - getEffectiveBottomSafePx());
       const maxScroll = Math.max(0, document.documentElement.scrollHeight - viewportHeight);
 
       if (isComicBookActive() && !isComicPagedMode()) {
         const res = computeComicScrollTarget(
           getVisibleComicPageRects(),
-          usableViewport,
+          visibleHeight,
           scrollY,
           maxScroll,
           'prev',
@@ -5955,8 +6348,8 @@
           showToast('已是第一章頂部');
         }
       } else {
-        // Page up by usable viewport ratio
-        const step = Math.max(160, Math.floor(usableViewport * overlapRatio));
+        // Page up by visible reading area
+        const step = Math.max(160, Math.floor(visibleHeight * overlapRatio));
         const target = Math.max(0, scrollY - step);
         window.scrollTo({ top: target, behavior: scrollBehavior });
       }
@@ -5965,7 +6358,7 @@
     // Tap reader view (including outer margins) to flip page/chapter (or interact with highlights)
     const readerViewEl = document.getElementById('reader-view');
     const READER_INTERACTIVE_IGNORE =
-      'button, a, input, select, textarea, .reader-topbar, #fullscreen-floating-hud, #reader-settings-popover, #annotation-toolbar, #text-selection-popover, .comic-toolbar-banner, .comic-pager-bar, .pdf-reflow-banner, .chapter-footer-nav';
+      'button, a, input, select, textarea, .reader-topbar, #fullscreen-floating-hud, #reader-settings-popover, #jump-page-popover, #annotation-toolbar, #text-selection-popover, .comic-toolbar-banner, .comic-pager-bar, .comic-pager-jump-group, .pdf-reflow-banner, .chapter-footer-nav';
     let comicTouchTap = null;
     let comicTapFallbackTimer = null;
 
@@ -6034,6 +6427,12 @@
       const popover = document.getElementById('reader-settings-popover');
       if (popover.classList.contains('open')) {
         popover.classList.remove('open');
+        return;
+      }
+
+      const jumpPopover = document.getElementById('jump-page-popover');
+      if (jumpPopover && jumpPopover.classList.contains('open')) {
+        closeJumpPagePopover();
         return;
       }
 
@@ -6107,6 +6506,8 @@
           if ((state.lastComicSwipeAt || 0) >= tapStartAt) return;
           const popover = document.getElementById('reader-settings-popover');
           if (popover && popover.classList.contains('open')) return;
+          const jumpPopover = document.getElementById('jump-page-popover');
+          if (jumpPopover && jumpPopover.classList.contains('open')) return;
           state.lastReaderClickAt = Date.now();
           executeReaderTapFlip(tapX);
         }, 70);
@@ -6481,8 +6882,85 @@
 
     settingsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      closeJumpPagePopover();
       settingsPopover.classList.toggle('open');
     });
+
+    const jumpPageBtn = document.getElementById('reader-jump-page-btn');
+    if (jumpPageBtn) {
+      jumpPageBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleJumpPagePopover();
+      });
+    }
+
+    const footerJumpBtn = document.getElementById('footer-jump-page-btn');
+    if (footerJumpBtn) {
+      footerJumpBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openJumpPagePopover();
+      });
+    }
+
+    const closeJumpBtn = document.getElementById('close-jump-page-btn');
+    if (closeJumpBtn) {
+      closeJumpBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeJumpPagePopover();
+      });
+    }
+
+    const jumpPagePopover = document.getElementById('jump-page-popover');
+    if (jumpPagePopover) {
+      jumpPagePopover.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    const jumpPageForm = document.getElementById('jump-page-form');
+    const jumpPageInput = document.getElementById('jump-page-input');
+    const jumpPageSlider = document.getElementById('jump-page-slider');
+    if (jumpPageSlider) {
+      jumpPageSlider.addEventListener('input', (e) => {
+        const val = parseInt(e.target.value, 10) || 1;
+        if (jumpPageInput) jumpPageInput.value = String(val);
+        const rangeEl = document.getElementById('jump-page-range-label');
+        const total = parseInt(jumpPageSlider.max, 10) || 1;
+        if (rangeEl) rangeEl.textContent = `${val} / ${total} 頁`;
+      });
+      jumpPageSlider.addEventListener('change', (e) => {
+        jumpToReaderPage(e.target.value, { closePopover: false });
+      });
+    }
+    if (jumpPageForm) {
+      jumpPageForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        jumpToReaderPage(jumpPageInput?.value);
+      });
+    }
+    document.querySelectorAll('[data-jump-preset]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const info = getCurrentReaderPaginationInfo();
+        const preset = btn.dataset.jumpPreset;
+        let target = info.currentPage;
+        if (preset === 'first') target = 1;
+        else if (preset === 'last') target = info.totalPages;
+        else if (preset === '-5') target = Math.max(1, info.currentPage - 5);
+        else if (preset === '+5') target = Math.min(info.totalPages, info.currentPage + 5);
+        if (jumpPageInput) jumpPageInput.value = String(target);
+        jumpToReaderPage(target, { closePopover: false });
+      });
+    });
+
+    const jumpChapterForm = document.getElementById('jump-chapter-form');
+    const jumpChapterInput = document.getElementById('jump-chapter-input');
+    if (jumpChapterForm) {
+      jumpChapterForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        jumpToReaderChapter(jumpChapterInput?.value);
+      });
+    }
 
     document.querySelectorAll('[data-dir-opt]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -6636,6 +7114,22 @@
       });
     }
 
+    const fsHudInfo = document.getElementById('fullscreen-hud-info');
+    if (fsHudInfo) {
+      fsHudInfo.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleJumpPagePopover();
+      });
+    }
+
+    const fsHudJumpBtn = document.getElementById('fullscreen-hud-jump-btn');
+    if (fsHudJumpBtn) {
+      fsHudJumpBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleJumpPagePopover();
+      });
+    }
+
     const fsHudExitBtn = document.getElementById('fullscreen-hud-exit-btn');
     if (fsHudExitBtn) {
       fsHudExitBtn.addEventListener('click', (e) => {
@@ -6660,6 +7154,8 @@
     document.addEventListener('webkitfullscreenchange', syncNativeFsExit);
     window.addEventListener('resize', () => {
       syncReaderViewportHeight();
+      updateReaderPageIndicator();
+      if (state.readerFullscreen) updateFullscreenHUDInfo();
       if (state.readerFullscreen && isComicBookActive() && state.currentComicPages.length > 0) {
         scheduleComicSvgRefresh();
       }
@@ -6667,6 +7163,8 @@
     window.addEventListener('orientationchange', () => {
       setTimeout(() => {
         syncReaderViewportHeight();
+        updateReaderPageIndicator();
+        if (state.readerFullscreen) updateFullscreenHUDInfo();
         if (state.readerFullscreen && isComicBookActive() && state.currentComicPages.length > 0) {
           scheduleComicSvgRefresh();
         }
