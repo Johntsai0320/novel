@@ -1817,12 +1817,12 @@ button {
     height: 116px;
   }
   .reader-topbar {
-    padding: 0.35rem 0.6rem;
+    padding: 0.32rem 0.6rem;
     max-width: 100%;
   }
   .reader-topbar-inner {
     flex-wrap: wrap;
-    gap: 0.32rem;
+    gap: 0.28rem;
   }
   .reader-nav-left {
     flex: 1 1 100%;
@@ -1832,18 +1832,26 @@ button {
   .reader-actions {
     width: 100%;
     max-width: 100%;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
     gap: 0.28rem;
     justify-content: flex-start;
   }
+  .reader-actions::-webkit-scrollbar {
+    display: none;
+  }
   .reader-actions .btn {
-    padding: 0.22rem 0.44rem;
-    font-size: 0.73rem;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 0.22rem 0.46rem;
+    font-size: 0.74rem;
   }
   .settings-popover {
-    top: 108px;
-    max-height: calc(100vh - 122px);
-    max-height: calc(100dvh - 122px);
+    top: 88px;
+    max-height: calc(100vh - 102px);
+    max-height: calc(100dvh - 102px);
   }
   body.reader-fullscreen .settings-popover {
     top: 3.1rem;

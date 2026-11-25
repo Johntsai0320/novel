@@ -341,7 +341,6 @@
     const num = Number(pref);
     if (Number.isFinite(num) && num > 0) return num;
     if (isEinkActive()) return 104;
-    if (isLikelyAndroidOrEink()) return 88;
     return 0;
   }
 
@@ -377,7 +376,7 @@
   }
 
   function getPageFlipOverlapRatio() {
-    return 0.82;
+    return 0.90;
   }
 
   function formatTurnerKeyLabel(e) {
