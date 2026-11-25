@@ -275,6 +275,7 @@
       comicMode: 'scroll',       // 'scroll' (條漫捲動) | 'single' (單頁翻頁) | 'double' (雙頁對開)
       comicDirection: 'rtl',     // 'rtl' (日漫右至左) | 'ltr' (左至右)
       comicFit: 'fit-width',     // 'fit-width' | 'fit-contain' | 'original'
+      comicVolumeFlip: true,     // 漫畫模式支援音量鍵／EinkBro 音量鍵翻頁
       einkMode: 'auto',          // 'auto' (偵測 EinkBro/BOOX) | 'on' | 'off'
       bottomSafePx: 'auto',      // 'auto' | 0 | 64 | 96 | 128 (EInkBro 底部工具列避讓留白)
       einkStylusOnly: false,     // BOOX 電磁筆防誤觸：僅限 pen 指標畫線，手指保留捲動
@@ -3334,10 +3335,16 @@
       b.classList.toggle('active', b.dataset.comicFitOpt === fit);
     });
 
+    const volCb = document.getElementById('comic-volume-flip-checkbox');
+    if (volCb) {
+      volCb.checked = state.settings.comicVolumeFlip !== false;
+    }
+
     const canvasEl = document.getElementById('reader-canvas');
     if (canvasEl) {
       canvasEl.classList.toggle('comic-reader-canvas', isComic);
       canvasEl.classList.toggle('comic-double-mode', isComic && mode === 'double');
+      canvasEl.classList.toggle('comic-paged-scroll-trap', isComicScrollTrapActive());
       if (isComic) {
         canvasEl.classList.remove('vertical-mode');
       }
@@ -3346,6 +3353,71 @@
     if (state.readerFullscreen && typeof updateFullscreenHUDInfo === 'function') {
       updateFullscreenHUDInfo();
     }
+  }
+
+  function isComicScrollTrapActive() {
+    return Boolean(
+      state.readerFullscreen &&
+        isComicPagedMode() &&
+        (state.settings.comicFit || 'fit-width') !== 'original' &&
+        state.settings.comicVolumeFlip !== false
+    );
+  }
+
+  function parkComicScrollTrap() {
+    if (!isComicScrollTrapActive()) return;
+    state.comicScrollTrapGuardUntil = Date.now() + 260;
+    window.scrollTo({ top: 1000, behavior: 'instant' });
+  }
+
+  function classifyPageTurnerKey(e) {
+    const key = e.key || '';
+    const code = e.code || '';
+    const kc = e.keyCode || e.which || 0;
+
+    const isPgDown = key === 'PageDown' || code === 'PageDown' || kc === 34 || kc === 93;
+    const isPgUp = key === 'PageUp' || code === 'PageUp' || kc === 33 || kc === 92;
+
+    const isVolDown =
+      key === 'AudioVolumeDown' ||
+      key === 'VolumeDown' ||
+      key === 'XF86AudioLowerVolume' ||
+      code === 'AudioVolumeDown' ||
+      code === 'VolumeDown' ||
+      kc === 25 ||
+      kc === 174 ||
+      kc === 182 ||
+      key === 'MediaTrackNext' ||
+      code === 'MediaTrackNext';
+
+    const isVolUp =
+      key === 'AudioVolumeUp' ||
+      key === 'VolumeUp' ||
+      key === 'XF86AudioRaiseVolume' ||
+      code === 'AudioVolumeUp' ||
+      code === 'VolumeUp' ||
+      kc === 24 ||
+      kc === 175 ||
+      kc === 183 ||
+      key === 'MediaTrackPrevious' ||
+      code === 'MediaTrackPrevious';
+
+    const isSpaceNext = key === ' ' && !e.shiftKey;
+    const isSpacePrev = key === ' ' && Boolean(e.shiftKey);
+
+    if (isVolDown) return { direction: 'next', isVolumeKey: true };
+    if (isVolUp) return { direction: 'prev', isVolumeKey: true };
+    if (isPgDown || isSpaceNext || key === 'ArrowDown') return { direction: 'next', isVolumeKey: false };
+    if (isPgUp || isSpacePrev || key === 'ArrowUp') return { direction: 'prev', isVolumeKey: false };
+    return null;
+  }
+
+  function evaluateComicScrollTrapDelta(scrollY, restY = 1000, threshold = 25, swapped = false) {
+    const delta = scrollY - restY;
+    if (Math.abs(delta) < threshold) return 'none';
+    const rawAction = delta > 0 ? 'next' : 'prev';
+    if (swapped) return rawAction === 'next' ? 'prev' : 'next';
+    return rawAction;
   }
 
   function getComicFitClassName(fit) {
@@ -3551,6 +3623,8 @@
             window.scrollTo({ top: Math.round((prevPct / 100) * maxScroll), behavior: 'instant' });
           }
         });
+      } else if (isComicScrollTrapActive()) {
+        parkComicScrollTrap();
       } else {
         window.scrollTo({ top: 0, behavior: 'instant' });
       }
@@ -3629,7 +3703,11 @@
     }
     state.comicCurrentPage = clamped;
     renderComicStage();
-    window.scrollTo({ top: 0, behavior: getScrollBehavior() });
+    if (isComicScrollTrapActive()) {
+      parkComicScrollTrap();
+    } else {
+      window.scrollTo({ top: 0, behavior: getScrollBehavior() });
+    }
     renderChapterHandwritingSVG();
     updateScrollRibbon();
     scheduleProgressSync();
@@ -4212,7 +4290,11 @@
     state.isRestoringScroll = true;
     requestAnimationFrame(() => {
       if (isComicPagedMode()) {
-        window.scrollTo({ top: 0, behavior: 'instant' });
+        if (isComicScrollTrapActive()) {
+          parkComicScrollTrap();
+        } else {
+          window.scrollTo({ top: 0, behavior: 'instant' });
+        }
       } else if (isVerticalMode()) {
         window.scrollTo({ top: 0, behavior: 'instant' });
         const { maxScroll } = getVerticalScrollInfo();
@@ -5144,6 +5226,7 @@
     }
 
     applyReaderSettingsToDOM();
+    updateComicModeUI();
     if (isScrollComic && scrollAnchor) {
       requestAnimationFrame(() => {
         syncReaderViewportHeight();
@@ -5159,6 +5242,14 @@
         }
         updateFullscreenHUDInfo();
       });
+    } else if (isComicScrollTrapActive()) {
+      requestAnimationFrame(() => {
+        syncReaderViewportHeight();
+        parkComicScrollTrap();
+        updateFullscreenHUDInfo();
+      });
+    } else if (!next && isComicPagedMode()) {
+      window.scrollTo({ top: 0, behavior: 'instant' });
     }
     if (isComicBookActive() && state.currentComicPages.length > 0) {
       scheduleComicSvgRefresh();
@@ -5594,22 +5685,18 @@
 
       const turnerMode = state.settings.pageTurnerMode || 'page';
       const swapped = turnerMode === 'swapped';
-      const kc = e.keyCode || e.which || 0;
 
       // 3. Universal Page-Turner Keys (PageDown/Up, Space, Volume keys, Media keys, Up/Down arrows)
-      const isPgDown = e.key === 'PageDown' || e.code === 'PageDown' || kc === 34 || kc === 93;
-      const isPgUp = e.key === 'PageUp' || e.code === 'PageUp' || kc === 33 || kc === 92;
-      const isVolDown = e.key === 'AudioVolumeDown' || e.key === 'VolumeDown' || kc === 25 || e.key === 'MediaTrackNext';
-      const isVolUp = e.key === 'AudioVolumeUp' || e.key === 'VolumeUp' || kc === 24 || e.key === 'MediaTrackPrevious';
-
-      if (isPgDown || isVolDown || (e.key === ' ' && !e.shiftKey) || e.key === 'ArrowDown') {
+      const matchedKey = classifyPageTurnerKey(e);
+      if (matchedKey) {
+        if (matchedKey.isVolumeKey && isComicBookActive() && state.settings.comicVolumeFlip === false) {
+          return;
+        }
         e.preventDefault();
-        triggerTurnerAction(swapped ? 'prev' : 'next');
-        return;
-      }
-      if (isPgUp || isVolUp || (e.key === ' ' && e.shiftKey) || e.key === 'ArrowUp') {
-        e.preventDefault();
-        triggerTurnerAction(swapped ? 'next' : 'prev');
+        const action = swapped
+          ? (matchedKey.direction === 'next' ? 'prev' : 'next')
+          : matchedKey.direction;
+        triggerTurnerAction(action);
         return;
       }
 
@@ -5668,9 +5755,58 @@
     // Scroll listener for progress ribbon & auto-sync (both window and vertical #reader-canvas)
     const handleReaderScroll = () => {
       if (!document.getElementById('reader-view').classList.contains('active')) return;
+      if (isComicScrollTrapActive()) {
+        if (Date.now() < (state.comicScrollTrapGuardUntil || 0)) return;
+        const swapped = (state.settings.pageTurnerMode || 'page') === 'swapped';
+        const action = evaluateComicScrollTrapDelta(
+          window.scrollY || window.pageYOffset || 0,
+          1000,
+          25,
+          swapped
+        );
+        if (action !== 'none') {
+          parkComicScrollTrap();
+          triggerTurnerAction(action);
+        }
+        return;
+      }
       updateScrollRibbon();
       if (!state.isRestoringScroll) {
         scheduleProgressSync();
+      }
+    };
+
+    const nativeWindowScrollBy = window.scrollBy.bind(window);
+    window.scrollBy = function (xOrOpts, y) {
+      if (
+        !state.isInternalScrollBy &&
+        document.getElementById('reader-view')?.classList.contains('active') &&
+        isComicPagedMode() &&
+        state.settings.comicVolumeFlip !== false &&
+        (state.settings.comicFit || 'fit-width') !== 'original'
+      ) {
+        let dx = 0;
+        let dy = 0;
+        if (xOrOpts && typeof xOrOpts === 'object') {
+          dx = Number(xOrOpts.left) || 0;
+          dy = Number(xOrOpts.top) || 0;
+        } else {
+          dx = Number(xOrOpts) || 0;
+          dy = Number(y) || 0;
+        }
+        if (Math.abs(dy) >= 25 && Math.abs(dy) >= Math.abs(dx)) {
+          const swapped = (state.settings.pageTurnerMode || 'page') === 'swapped';
+          const rawAction = dy > 0 ? 'next' : 'prev';
+          const action = swapped ? (rawAction === 'next' ? 'prev' : 'next') : rawAction;
+          triggerTurnerAction(action);
+          return;
+        }
+      }
+      state.isInternalScrollBy = true;
+      try {
+        return nativeWindowScrollBy.apply(window, arguments);
+      } finally {
+        state.isInternalScrollBy = false;
       }
     };
 
@@ -6377,6 +6513,25 @@
         setComicFit(btn.dataset.comicFitOpt);
       });
     });
+
+    const comicVolumeFlipCheckbox = document.getElementById('comic-volume-flip-checkbox');
+    if (comicVolumeFlipCheckbox) {
+      comicVolumeFlipCheckbox.addEventListener('change', (e) => {
+        state.settings.comicVolumeFlip = Boolean(e.target.checked);
+        updateComicModeUI();
+        if (isComicScrollTrapActive()) {
+          parkComicScrollTrap();
+        } else if (isComicPagedMode()) {
+          window.scrollTo({ top: 0, behavior: 'instant' });
+        }
+        pushCloudSync();
+        showToast(
+          state.settings.comicVolumeFlip
+            ? '🔊 已開啟漫畫音量鍵翻頁'
+            : '已關閉漫畫音量鍵翻頁（音量鍵將僅調整音量）'
+        );
+      });
+    }
 
     document.querySelectorAll('[data-flip-opt]').forEach((btn) => {
       btn.addEventListener('click', () => {

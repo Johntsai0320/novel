@@ -2600,8 +2600,30 @@ body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas .comic-scroll-
   height: auto;
 }
 
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas.comic-paged-scroll-trap {
+  height: calc(100vh + 2000px);
+  height: calc(100dvh + 2000px);
+  height: calc(var(--reader-vh, 100dvh) + 2000px);
+  position: relative;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas.comic-paged-scroll-trap .chapter-stage {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  height: var(--reader-vh, 100dvh);
+  z-index: 10;
+}
+
+body.reader-fullscreen .reader-canvas-wrapper.comic-reader-canvas.comic-paged-scroll-trap .comic-paged-stage {
+  touch-action: none;
+}
+
 body.reader-fullscreen .toast-container {
   bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
 }
+
 
 
