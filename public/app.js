@@ -282,7 +282,9 @@
       pageTurnerMode: 'page',    // 'page' (標準頁內翻頁) | 'swapped' (反轉握持) | 'chapter' (整章切換)
       pageTurnerNextKey: '',     // Learned custom key token "code|key|keyCode|label"
       pageTurnerPrevKey: '',     // Learned custom key token "code|key|keyCode|label"
-      clickFlip: 'both' // 'both' | 'left_next' | 'next_only' | 'off'
+      clickFlip: 'both',         // 'both' | 'left_next' | 'next_only' | 'off'
+      autoFlipIntervalSec: 8,    // 自動翻頁間隔秒數 (1 ~ 120 秒)
+      autoFlipRefreshEvery: 'auto' // 自動翻頁刷殘影頻率: 'auto' (墨水屏每5頁) | 0 (關閉) | 1 | 3 | 5 | 10
     },
 
     // Active Reader Session & Annotation Tools
@@ -299,6 +301,9 @@
     isRestoringScroll: false,
     readerFullscreen: false,
     nativeFullscreenEntered: false,
+    autoFlipActive: false,
+    autoFlipNextTickAt: 0,
+    autoFlipPageCount: 0,
     annotToolbarOpen: false,
     annotTool: 'read',      // 'read' | 'highlighter' | 'pen' | 'eraser'
     annotColor: 'yellow',   // 'yellow' | 'green' | 'blue' | 'pink'
@@ -306,6 +311,333 @@
     editingHighlightId: null,
     learningTurnerTarget: null // null | 'next' | 'prev'
   };
+
+  const AUTO_FLIP_MIN_SEC = 1;
+  const AUTO_FLIP_MAX_SEC = 120;
+  const AUTO_FLIP_DEFAULT_SEC = 8;
+  let autoFlipTimerId = null;
+  let autoFlipCountdownTimerId = null;
+  let autoFlipAdvanceFn = null;
+  let ghostRefreshTimers = [];
+
+  function normalizeAutoFlipInterval(raw, fallback = AUTO_FLIP_DEFAULT_SEC) {
+    const num = Number(raw);
+    if (!Number.isFinite(num) || String(raw ?? '').trim() === '') {
+      return fallback;
+    }
+    const rounded = Math.round(num);
+    return Math.max(AUTO_FLIP_MIN_SEC, Math.min(AUTO_FLIP_MAX_SEC, rounded));
+  }
+
+  function formatAutoFlipIntervalLabel(sec) {
+    const s = normalizeAutoFlipInterval(sec);
+    if (s >= 60) {
+      const mins = Math.floor(s / 60);
+      const rem = s % 60;
+      return rem === 0 ? `${mins} 分` : `${mins} 分 ${rem} 秒`;
+    }
+    return `${s} 秒`;
+  }
+
+  function computeAutoFlipRemainingSec(nextTickAt, now, intervalSec) {
+    const safeInterval = normalizeAutoFlipInterval(intervalSec);
+    if (!Number.isFinite(nextTickAt) || nextTickAt <= 0) return safeInterval;
+    const diffMs = Math.max(0, nextTickAt - now);
+    return Math.max(1, Math.min(safeInterval, Math.ceil(diffMs / 1000)));
+  }
+
+  function shouldPauseAutoFlipTick(ctx) {
+    if (!ctx || !ctx.readerActive) return true;
+    if (ctx.isHidden) return true;
+    if (ctx.drawerOpen) return true;
+    if (ctx.modalOpen) return true;
+    if (ctx.annotTool && ctx.annotTool !== 'read') return true;
+    return false;
+  }
+
+  function normalizeGhostRefreshSetting(raw) {
+    if (raw === undefined || raw === null || raw === '' || raw === 'auto') return 'auto';
+    if (raw === 0 || raw === '0' || raw === 'off' || raw === false) return 0;
+    const num = Math.floor(Number(raw));
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    return Math.min(50, Math.max(1, num));
+  }
+
+  function resolveGhostRefreshEvery(pref, einkActive) {
+    const norm = normalizeGhostRefreshSetting(pref);
+    if (norm === 0) return 0;
+    if (norm === 'auto') return einkActive ? 5 : 0;
+    return norm;
+  }
+
+  function shouldTriggerGhostRefresh(pageCount, pref, einkActive) {
+    const every = resolveGhostRefreshEvery(pref, einkActive);
+    if (every <= 0) return false;
+    const count = Math.floor(Number(pageCount) || 0);
+    return count > 0 && count % every === 0;
+  }
+
+  function formatGhostRefreshLabel(pref, einkActive) {
+    const norm = normalizeGhostRefreshSetting(pref);
+    if (norm === 0) return '已關閉';
+    if (norm === 'auto') {
+      return einkActive ? '墨水屏自動（每 5 頁）' : '自動（僅墨水屏啟用）';
+    }
+    return norm === 1 ? '每 1 頁（每次翻頁）' : `每 ${norm} 頁`;
+  }
+
+  function clearGhostRefreshOverlay() {
+    ghostRefreshTimers.forEach((id) => clearTimeout(id));
+    ghostRefreshTimers = [];
+    const overlay = document.getElementById('eink-ghost-refresh-overlay');
+    if (overlay) {
+      overlay.classList.remove('phase-black', 'phase-white');
+    }
+  }
+
+  function triggerGhostRefresh(options = {}) {
+    const overlay = document.getElementById('eink-ghost-refresh-overlay');
+    if (!overlay) return false;
+    clearGhostRefreshOverlay();
+
+    const delayMs = Math.max(0, Number(options.delayMs) || 0);
+    const blackMs = Math.max(40, Number(options.blackMs) || 95);
+    const whiteMs = Math.max(40, Number(options.whiteMs) || 95);
+
+    const runFlash = () => {
+      const prevCount = parseInt(overlay.dataset.refreshCount || '0', 10) || 0;
+      overlay.dataset.refreshCount = String(prevCount + 1);
+      overlay.classList.remove('phase-white');
+      overlay.classList.add('phase-black');
+
+      const t1 = setTimeout(() => {
+        overlay.classList.remove('phase-black');
+        overlay.classList.add('phase-white');
+        const t2 = setTimeout(() => {
+          overlay.classList.remove('phase-black', 'phase-white');
+        }, whiteMs);
+        ghostRefreshTimers.push(t2);
+      }, blackMs);
+      ghostRefreshTimers.push(t1);
+    };
+
+    if (delayMs > 0) {
+      const t0 = setTimeout(runFlash, delayMs);
+      ghostRefreshTimers.push(t0);
+    } else {
+      runFlash();
+    }
+    return true;
+  }
+
+  function getAutoFlipIntervalSec() {
+    return normalizeAutoFlipInterval(state.settings.autoFlipIntervalSec, AUTO_FLIP_DEFAULT_SEC);
+  }
+
+  function clearAutoFlipTimers() {
+    if (autoFlipTimerId) {
+      clearTimeout(autoFlipTimerId);
+      autoFlipTimerId = null;
+    }
+    if (autoFlipCountdownTimerId) {
+      clearInterval(autoFlipCountdownTimerId);
+      autoFlipCountdownTimerId = null;
+    }
+  }
+
+  function getAutoFlipPauseContext() {
+    return {
+      readerActive: Boolean(document.getElementById('reader-view')?.classList.contains('active')),
+      isHidden: Boolean(document.hidden),
+      drawerOpen: Boolean(document.getElementById('toc-drawer')?.classList.contains('open')),
+      modalOpen: Boolean(document.querySelector('.modal-dialog.open')),
+      annotTool: state.annotTool || 'read'
+    };
+  }
+
+  function updateAutoFlipUI() {
+    const intervalSec = getAutoFlipIntervalSec();
+    const active = Boolean(state.autoFlipActive);
+    const labelText = formatAutoFlipIntervalLabel(intervalSec);
+    const einkOn = isEinkActive();
+    const remaining = active
+      ? einkOn
+        ? intervalSec
+        : computeAutoFlipRemainingSec(state.autoFlipNextTickAt, Date.now(), intervalSec)
+      : intervalSec;
+
+    const topBtn = document.getElementById('reader-auto-flip-btn');
+    const topText = document.getElementById('reader-auto-flip-text');
+    if (topBtn) {
+      topBtn.classList.toggle('btn-pill-active', active);
+      topBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+    if (topText) {
+      topText.textContent = active ? `⏸ ${remaining}s` : '▶ 自動';
+    }
+
+    const hudBtn = document.getElementById('fullscreen-hud-auto-flip-btn');
+    if (hudBtn) {
+      hudBtn.classList.toggle('is-active', active);
+      hudBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      hudBtn.textContent = active ? `⏸ ${remaining}s` : '▶ 自動';
+    }
+
+    const statusEl = document.getElementById('auto-flip-status-label');
+    if (statusEl) {
+      statusEl.textContent = active ? `進行中 · 每 ${labelText}` : `已關閉 · ${labelText}`;
+    }
+
+    const settingsToggleBtn = document.getElementById('settings-auto-flip-toggle-btn');
+    if (settingsToggleBtn) {
+      settingsToggleBtn.classList.toggle('is-active', active);
+      settingsToggleBtn.textContent = active
+        ? `⏸ 暫停自動翻頁（每 ${labelText}）`
+        : `▶ 開始自動翻頁（每 ${labelText}）`;
+    }
+
+    const slider = document.getElementById('auto-flip-slider');
+    if (slider && document.activeElement !== slider) {
+      slider.value = String(Math.min(60, Math.max(1, intervalSec)));
+    }
+
+    const input = document.getElementById('auto-flip-interval-input');
+    if (input && document.activeElement !== input) {
+      input.value = String(intervalSec);
+    }
+
+    document.querySelectorAll('[data-auto-flip-sec]').forEach((btn) => {
+      btn.classList.toggle('active', parseInt(btn.dataset.autoFlipSec, 10) === intervalSec);
+    });
+
+    const ghostPref = normalizeGhostRefreshSetting(state.settings.autoFlipRefreshEvery);
+    const ghostLabel = document.getElementById('auto-flip-ghost-refresh-label');
+    if (ghostLabel) {
+      ghostLabel.textContent = formatGhostRefreshLabel(ghostPref, einkOn);
+    }
+    document.querySelectorAll('[data-auto-flip-refresh]').forEach((btn) => {
+      const optVal = normalizeGhostRefreshSetting(btn.dataset.autoFlipRefresh);
+      btn.classList.toggle('active', optVal === ghostPref);
+    });
+  }
+
+  function scheduleNextAutoFlipTick() {
+    clearAutoFlipTimers();
+    if (!state.autoFlipActive) return;
+
+    const intervalSec = getAutoFlipIntervalSec();
+    const delayMs = intervalSec * 1000;
+    state.autoFlipNextTickAt = Date.now() + delayMs;
+    updateAutoFlipUI();
+
+    if (!isEinkActive()) {
+      autoFlipCountdownTimerId = setInterval(() => {
+        if (!state.autoFlipActive) {
+          clearAutoFlipTimers();
+          return;
+        }
+        updateAutoFlipUI();
+      }, 500);
+    }
+
+    autoFlipTimerId = setTimeout(() => {
+      if (!state.autoFlipActive) return;
+      if (shouldPauseAutoFlipTick(getAutoFlipPauseContext())) {
+        scheduleNextAutoFlipTick();
+        return;
+      }
+      const advanced = typeof autoFlipAdvanceFn === 'function' ? autoFlipAdvanceFn() : false;
+      if (!advanced) {
+        stopAutoFlip({ silent: true });
+        showToast('已讀至全書末尾，自動翻頁已停止');
+        return;
+      }
+      state.autoFlipPageCount = (state.autoFlipPageCount || 0) + 1;
+      if (
+        shouldTriggerGhostRefresh(
+          state.autoFlipPageCount,
+          state.settings.autoFlipRefreshEvery,
+          isEinkActive()
+        )
+      ) {
+        triggerGhostRefresh({ delayMs: 60 });
+      }
+      scheduleNextAutoFlipTick();
+    }, delayMs);
+  }
+
+  function resetAutoFlipCountdown() {
+    if (!state.autoFlipActive) return;
+    scheduleNextAutoFlipTick();
+  }
+
+  function startAutoFlip(options = {}) {
+    if (!document.getElementById('reader-view')?.classList.contains('active') || !state.currentBook) {
+      return false;
+    }
+    state.autoFlipActive = true;
+    state.autoFlipPageCount = 0;
+    scheduleNextAutoFlipTick();
+    if (!options.silent) {
+      const ghostEvery = resolveGhostRefreshEvery(
+        state.settings.autoFlipRefreshEvery,
+        isEinkActive()
+      );
+      const ghostHint = ghostEvery > 0 ? `，每 ${ghostEvery} 頁自動刷殘影` : '';
+      showToast(
+        `▶ 已開啟自動翻頁（每 ${formatAutoFlipIntervalLabel(getAutoFlipIntervalSec())} 翻頁${ghostHint}）`
+      );
+    }
+    return true;
+  }
+
+  function stopAutoFlip(options = {}) {
+    const wasActive = Boolean(state.autoFlipActive);
+    state.autoFlipActive = false;
+    state.autoFlipNextTickAt = 0;
+    state.autoFlipPageCount = 0;
+    clearAutoFlipTimers();
+    clearGhostRefreshOverlay();
+    updateAutoFlipUI();
+    if (wasActive && !options.silent) {
+      showToast('⏸ 已暫停自動翻頁');
+    }
+  }
+
+  function toggleAutoFlip() {
+    if (state.autoFlipActive) {
+      stopAutoFlip();
+    } else {
+      startAutoFlip();
+    }
+  }
+
+  function setAutoFlipInterval(rawSec, options = {}) {
+    const nextSec = normalizeAutoFlipInterval(rawSec, getAutoFlipIntervalSec());
+    state.settings.autoFlipIntervalSec = nextSec;
+    if (state.autoFlipActive) {
+      scheduleNextAutoFlipTick();
+    } else {
+      updateAutoFlipUI();
+    }
+    pushCloudSync();
+    if (!options.silent) {
+      showToast(`⏱️ 自動翻頁時間已設為每 ${formatAutoFlipIntervalLabel(nextSec)}`);
+    }
+    return nextSec;
+  }
+
+  function setAutoFlipRefreshEvery(rawVal, options = {}) {
+    const nextPref = normalizeGhostRefreshSetting(rawVal);
+    state.settings.autoFlipRefreshEvery = nextPref;
+    state.autoFlipPageCount = 0;
+    updateAutoFlipUI();
+    pushCloudSync();
+    if (!options.silent) {
+      showToast(`✨ 自動刷殘影已設為：${formatGhostRefreshLabel(nextPref, isEinkActive())}`);
+    }
+    return nextPref;
+  }
 
   function isEinkBrowserUA() {
     return /EinkBro|Onyx|BOOX|NoteAir|TabUltra|Palma|Poke|Leaf|Nova|Mira/i.test(navigator.userAgent || '');
@@ -3850,6 +4182,8 @@
       return false;
     }
 
+    resetAutoFlipCountdown();
+
     if (info.isComic) {
       const mode = state.settings.comicMode || 'scroll';
       const resolved = resolveComicJumpTarget(parsed.page, info.totalPages, mode);
@@ -3908,6 +4242,7 @@
       showToast(parsed.error);
       return false;
     }
+    resetAutoFlipCountdown();
     closeJumpPagePopover();
     await loadAndRenderChapter(parsed.page - 1, 0);
     const unit = isComicBookActive() ? '話' : '章';
@@ -4051,17 +4386,20 @@
     scheduleProgressSync();
   }
 
-  function comicNextPage() {
+  function comicNextPage(options = {}) {
     const pages = state.currentComicPages || [];
-    if (pages.length === 0) return;
+    if (pages.length === 0) return false;
     const step = state.settings.comicMode === 'double' ? 2 : 1;
     if (state.comicCurrentPage + step < pages.length) {
       goToComicPage(state.comicCurrentPage + step);
+      return true;
     } else if (state.currentChapter && state.currentChapter.nextIndex !== null) {
       loadAndRenderChapter(state.currentChapter.nextIndex, 0);
       showToast(`已翻至下一話：${convertStr(state.currentChapter?.title || '')}`);
+      return true;
     } else {
-      showToast('已是全書最後一頁');
+      if (!options.silentEnd) showToast('已是全書最後一頁');
+      return false;
     }
   }
 
@@ -4686,6 +5024,7 @@
   }
 
   function closeReaderView() {
+    stopAutoFlip({ silent: true });
     if (state.readerFullscreen) {
       setReaderFullscreen(false, { silent: true });
     }
@@ -5764,6 +6103,7 @@
     updateComicModeUI();
     updateGlobalConvertButtonUI();
     updateEinkAndTurnerUI();
+    updateAutoFlipUI();
     if (document.getElementById('reader-view')?.classList.contains('active')) {
       requestAnimationFrame(() => {
         updateReaderPageIndicator();
@@ -5981,18 +6321,21 @@
 
     document.getElementById('prev-chapter-btn').addEventListener('click', () => {
       if (state.currentChapter && state.currentChapter.prevIndex !== null) {
+        resetAutoFlipCountdown();
         loadAndRenderChapter(state.currentChapter.prevIndex, 0);
       }
     });
 
     document.getElementById('next-chapter-btn').addEventListener('click', () => {
       if (state.currentChapter && state.currentChapter.nextIndex !== null) {
+        resetAutoFlipCountdown();
         loadAndRenderChapter(state.currentChapter.nextIndex, 0);
       }
     });
 
     // Keyboard & Bluetooth Page-Turner Navigation in Reader View
     const triggerTurnerAction = (dirAction) => {
+      resetAutoFlipCountdown();
       if (isComicPagedMode()) {
         if (dirAction === 'next') comicNextPage();
         else comicPrevPage();
@@ -6062,6 +6405,12 @@
       if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         toggleJumpPagePopover();
+        return;
+      }
+
+      if ((e.key === 'a' || e.key === 'A') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        toggleAutoFlip();
         return;
       }
 
@@ -6224,7 +6573,7 @@
     }
 
     // Helper functions for page flipping (scroll within chapter, change chapter at boundary)
-    function flipToNextPageOrChapter() {
+    function flipToNextPageOrChapter(options = {}) {
       const overlapRatio = getPageFlipOverlapRatio();
       const scrollBehavior = getScrollBehavior();
 
@@ -6235,14 +6584,14 @@
           if (state.currentChapter && state.currentChapter.nextIndex !== null) {
             loadAndRenderChapter(state.currentChapter.nextIndex, 0);
             showToast(`已翻至下一章：${convertStr(state.currentChapter?.title || '')}`);
-          } else {
-            showToast('已是全書最後一章');
+            return true;
           }
-        } else {
-          const step = Math.max(160, Math.floor(viewportSize * overlapRatio));
-          scrollVerticalTo(Math.min(maxScroll, scrolled + step), scrollBehavior);
+          if (!options.silentEnd) showToast('已是全書最後一章');
+          return false;
         }
-        return;
+        const step = Math.max(160, Math.floor(viewportSize * overlapRatio));
+        scrollVerticalTo(Math.min(maxScroll, scrolled + step), scrollBehavior);
+        return true;
       }
 
       const { viewportHeight, visibleHeight } = getHorizontalReadingMetrics();
@@ -6263,13 +6612,13 @@
           if (state.currentChapter && state.currentChapter.nextIndex !== null) {
             loadAndRenderChapter(state.currentChapter.nextIndex, 0);
             showToast(`已翻至下一話：${convertStr(state.currentChapter?.title || '')}`);
-          } else {
-            showToast('已是全書最後一話');
+            return true;
           }
-        } else {
-          window.scrollTo({ top: res.targetY, behavior: scrollBehavior });
+          if (!options.silentEnd) showToast('已是全書最後一話');
+          return false;
         }
-        return;
+        window.scrollTo({ top: res.targetY, behavior: scrollBehavior });
+        return true;
       }
 
       // Distance from bottom of current chapter
@@ -6280,15 +6629,16 @@
         if (state.currentChapter && state.currentChapter.nextIndex !== null) {
           loadAndRenderChapter(state.currentChapter.nextIndex, 0);
           showToast(`已翻至下一章：${convertStr(state.currentChapter?.title || '')}`);
-        } else {
-          showToast('已是全書最後一章');
+          return true;
         }
-      } else {
-        // Page down by visible reading area (excludes sticky topbar & EInkBro bottom toolbar)
-        const step = Math.max(160, Math.floor(visibleHeight * overlapRatio));
-        const target = Math.min(maxScroll, scrollY + step);
-        window.scrollTo({ top: target, behavior: scrollBehavior });
+        if (!options.silentEnd) showToast('已是全書最後一章');
+        return false;
       }
+      // Page down by visible reading area (excludes sticky topbar & EInkBro bottom toolbar)
+      const step = Math.max(160, Math.floor(visibleHeight * overlapRatio));
+      const target = Math.min(maxScroll, scrollY + step);
+      window.scrollTo({ top: target, behavior: scrollBehavior });
+      return true;
     }
 
     function flipToPrevPageOrChapter() {
@@ -6354,6 +6704,13 @@
       }
     }
 
+    autoFlipAdvanceFn = () => {
+      if (isComicPagedMode()) {
+        return comicNextPage({ silentEnd: true });
+      }
+      return flipToNextPageOrChapter({ silentEnd: true });
+    };
+
     // Tap reader view (including outer margins) to flip page/chapter (or interact with highlights)
     const readerViewEl = document.getElementById('reader-view');
     const READER_INTERACTIVE_IGNORE =
@@ -6371,6 +6728,8 @@
       const ratio = clientX / winWidth;
       const action = resolveTapFlipAction(ratio, flipMode);
       if (action === 'none') return;
+
+      resetAutoFlipCountdown();
 
       if (isComicPagedMode()) {
         if (action === 'next') comicNextPage();
@@ -7027,6 +7386,95 @@
       });
     });
 
+    // Auto Page-Turning Controls (自動翻頁開關與間隔時間調整)
+    const readerAutoFlipBtn = document.getElementById('reader-auto-flip-btn');
+    if (readerAutoFlipBtn) {
+      readerAutoFlipBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleAutoFlip();
+      });
+    }
+
+    const settingsAutoFlipToggleBtn = document.getElementById('settings-auto-flip-toggle-btn');
+    if (settingsAutoFlipToggleBtn) {
+      settingsAutoFlipToggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleAutoFlip();
+      });
+    }
+
+    const autoFlipSlider = document.getElementById('auto-flip-slider');
+    const autoFlipInput = document.getElementById('auto-flip-interval-input');
+    if (autoFlipSlider) {
+      autoFlipSlider.addEventListener('input', (e) => {
+        const val = normalizeAutoFlipInterval(e.target.value, getAutoFlipIntervalSec());
+        if (autoFlipInput) autoFlipInput.value = String(val);
+        const statusEl = document.getElementById('auto-flip-status-label');
+        if (statusEl) {
+          statusEl.textContent = state.autoFlipActive
+            ? `進行中 · 每 ${formatAutoFlipIntervalLabel(val)}`
+            : `已關閉 · ${formatAutoFlipIntervalLabel(val)}`;
+        }
+      });
+      autoFlipSlider.addEventListener('change', (e) => {
+        setAutoFlipInterval(e.target.value);
+      });
+    }
+
+    if (autoFlipInput) {
+      autoFlipInput.addEventListener('click', (e) => e.stopPropagation());
+      autoFlipInput.addEventListener('change', (e) => {
+        const nextSec = setAutoFlipInterval(e.target.value);
+        autoFlipInput.value = String(nextSec);
+      });
+      autoFlipInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const nextSec = setAutoFlipInterval(autoFlipInput.value);
+          autoFlipInput.value = String(nextSec);
+        }
+      });
+    }
+
+    const autoFlipDecBtn = document.getElementById('auto-flip-dec-btn');
+    if (autoFlipDecBtn) {
+      autoFlipDecBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setAutoFlipInterval(getAutoFlipIntervalSec() - 1);
+      });
+    }
+
+    const autoFlipIncBtn = document.getElementById('auto-flip-inc-btn');
+    if (autoFlipIncBtn) {
+      autoFlipIncBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setAutoFlipInterval(getAutoFlipIntervalSec() + 1);
+      });
+    }
+
+    document.querySelectorAll('[data-auto-flip-sec]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setAutoFlipInterval(btn.dataset.autoFlipSec);
+      });
+    });
+
+    document.querySelectorAll('[data-auto-flip-refresh]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setAutoFlipRefreshEvery(btn.dataset.autoFlipRefresh);
+      });
+    });
+
+    const manualGhostRefreshBtn = document.getElementById('manual-ghost-refresh-btn');
+    if (manualGhostRefreshBtn) {
+      manualGhostRefreshBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.getElementById('reader-settings-popover')?.classList.remove('open');
+        triggerGhostRefresh({ delayMs: 20 });
+      });
+    }
+
     document.querySelectorAll('[data-theme-opt]').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.settings.theme = btn.dataset.themeOpt;
@@ -7121,6 +7569,14 @@
       });
     }
 
+    const fsHudAutoFlipBtn = document.getElementById('fullscreen-hud-auto-flip-btn');
+    if (fsHudAutoFlipBtn) {
+      fsHudAutoFlipBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleAutoFlip();
+      });
+    }
+
     const fsHudJumpBtn = document.getElementById('fullscreen-hud-jump-btn');
     if (fsHudJumpBtn) {
       fsHudJumpBtn.addEventListener('click', (e) => {
@@ -7136,6 +7592,12 @@
         setReaderFullscreen(false);
       });
     }
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && state.autoFlipActive) {
+        resetAutoFlipCountdown();
+      }
+    });
 
     const syncNativeFsExit = () => {
       syncReaderViewportHeight();

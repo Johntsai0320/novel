@@ -381,6 +381,15 @@
 
           <button
             type="button"
+            id="reader-auto-flip-btn"
+            class="btn"
+            title="開啟／暫停自動翻頁 (快捷鍵 A)"
+          >
+            <span id="reader-auto-flip-text">▶ 自動</span>
+          </button>
+
+          <button
+            type="button"
             id="reader-settings-btn"
             class="btn"
             title="字體大小、直橫排、行距與護眼/夜間主題設定"
@@ -602,6 +611,79 @@
         </div>
       </div>
 
+      <div id="auto-flip-settings-section" class="setting-row auto-flip-settings-section">
+        <div class="setting-label">
+          <span>⏱️ 自動翻頁與間隔時間</span>
+          <span id="auto-flip-status-label" style="font-size: 0.74rem; color: var(--accent);">已關閉 · 8 秒</span>
+        </div>
+        <button
+          type="button"
+          id="settings-auto-flip-toggle-btn"
+          class="btn auto-flip-toggle-btn"
+          title="開始或暫停自動翻頁 (A)"
+        >
+          ▶ 開始自動翻頁（每 8 秒）
+        </button>
+        <input
+          type="range"
+          id="auto-flip-slider"
+          class="jump-page-slider auto-flip-slider"
+          min="1"
+          max="60"
+          step="1"
+          value="8"
+          aria-label="自動翻頁間隔秒數滑桿"
+        />
+        <div class="auto-flip-stepper">
+          <button type="button" id="auto-flip-dec-btn" class="stepper-btn" title="減少 1 秒">-1s</button>
+          <div class="auto-flip-input-wrap">
+            <input
+              type="number"
+              id="auto-flip-interval-input"
+              class="form-input auto-flip-interval-input"
+              inputmode="numeric"
+              min="1"
+              max="120"
+              step="1"
+              value="8"
+              aria-label="自動翻頁間隔秒數"
+            />
+            <span class="auto-flip-unit">秒 / 頁</span>
+          </div>
+          <button type="button" id="auto-flip-inc-btn" class="stepper-btn" title="增加 1 秒">+1s</button>
+        </div>
+        <div class="segmented-group auto-flip-presets">
+          <button type="button" class="segmented-btn" data-auto-flip-sec="3">3秒</button>
+          <button type="button" class="segmented-btn" data-auto-flip-sec="5">5秒</button>
+          <button type="button" class="segmented-btn active" data-auto-flip-sec="8">8秒</button>
+          <button type="button" class="segmented-btn" data-auto-flip-sec="12">12秒</button>
+          <button type="button" class="segmented-btn" data-auto-flip-sec="20">20秒</button>
+          <button type="button" class="segmented-btn" data-auto-flip-sec="30">30秒</button>
+        </div>
+
+        <div class="auto-flip-ghost-row">
+          <div class="setting-label" style="margin-bottom: 0.35rem;">
+            <span>✨ 自動翻頁刷殘影 (E-Ink 全刷)</span>
+            <span id="auto-flip-ghost-refresh-label" style="font-size: 0.72rem; color: var(--accent);">自動（僅墨水屏啟用）</span>
+          </div>
+          <div class="segmented-group auto-flip-ghost-presets">
+            <button type="button" class="segmented-btn" data-auto-flip-refresh="0" title="停用自動刷殘影">關閉</button>
+            <button type="button" class="segmented-btn active" data-auto-flip-refresh="auto" title="墨水屏模式下每自動翻 5 頁進行一次黑白全刷清殘影">自動</button>
+            <button type="button" class="segmented-btn" data-auto-flip-refresh="1" title="每次自動翻頁都進行黑白全刷（適合漫畫彩色墨水屏）">每頁</button>
+            <button type="button" class="segmented-btn" data-auto-flip-refresh="3" title="每自動翻 3 頁刷殘影一次">3頁</button>
+            <button type="button" class="segmented-btn" data-auto-flip-refresh="5" title="每自動翻 5 頁刷殘影一次">5頁</button>
+            <button type="button" class="segmented-btn" data-auto-flip-refresh="10" title="每自動翻 10 頁刷殘影一次">10頁</button>
+          </div>
+          <button type="button" id="manual-ghost-refresh-btn" class="btn manual-ghost-refresh-btn" title="立即執行一次全螢幕黑白閃刷清除墨水屏殘影">
+            ✨ 立即刷除殘影
+          </button>
+        </div>
+
+        <div class="form-hint" style="margin-top: 0.35rem; font-size: 0.71rem;">
+          💡 支援小說（橫排／直排）與漫畫（條漫／單頁／雙頁），快捷鍵 <code>A</code> 快速開關；手動翻頁會重新計時，讀完自動停止。
+        </div>
+      </div>
+
       <div id="eink-turner-settings-section" class="setting-row" style="padding-top: 0.75rem; border-top: 1px solid var(--border-subtle);">
         <div class="setting-label">
           <span>⚡ BOOX / EinkBro 墨水屏調教</span>
@@ -735,6 +817,7 @@
       <button type="button" id="fullscreen-hud-comic-mode-btn" class="btn fullscreen-hud-action-btn" style="display: none;" title="切換漫畫模式：條漫 / 單頁 / 雙頁">📜 條漫</button>
       <button type="button" id="fullscreen-hud-comic-fit-btn" class="btn fullscreen-hud-action-btn" style="display: none;" title="切換圖片縮放：適寬 / 整頁 / 原寸">📐 適寬</button>
       <span id="fullscreen-hud-info" class="fullscreen-hud-info" title="點擊開啟指定頁面跳轉"></span>
+      <button type="button" id="fullscreen-hud-auto-flip-btn" class="btn fullscreen-hud-action-btn" title="開啟／暫停自動翻頁 (A)">▶ 自動</button>
       <button type="button" id="fullscreen-hud-jump-btn" class="btn fullscreen-hud-action-btn" title="翻頁到指定頁面 (G)">🔢 跳頁</button>
       <button type="button" id="fullscreen-hud-exit-btn" class="btn fullscreen-hud-exit-btn" title="退出全螢幕並恢復上方工具列 (Esc)">✕ 退出全螢幕</button>
     </div>
@@ -996,6 +1079,9 @@
 
   <!-- Toast Notifications -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- Full-Screen E-Ink Anti-Ghosting Flash Overlay (墨水屏全螢幕黑白刷殘影遮罩) -->
+  <div id="eink-ghost-refresh-overlay" class="eink-ghost-refresh-overlay" aria-hidden="true"></div>
 
   <!-- Local Vendor Bundles (OpenCC Simplified->Traditional & JSZip for static/WebDAV fallback) -->
   <script src="./vendor/opencc-cn2t.js"></script>

@@ -2795,3 +2795,126 @@ body.eink-mode .jump-page-popover {
     justify-content: center;
   }
 }
+
+/* ==========================================================================
+   Auto Page-Turning Controls (小說／漫畫自動翻頁與間隔時間設定)
+   ========================================================================== */
+
+.auto-flip-settings-section {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.auto-flip-toggle-btn {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 0.55rem;
+  font-weight: 600;
+}
+
+.auto-flip-toggle-btn.is-active {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+
+.auto-flip-slider {
+  margin-bottom: 0.5rem;
+}
+
+.auto-flip-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.auto-flip-input-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+.auto-flip-interval-input {
+  width: 76px;
+  padding: 0.28rem 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.auto-flip-unit {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.auto-flip-presets {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.auto-flip-presets .segmented-btn {
+  padding: 0.32rem 0.15rem;
+  font-size: 0.72rem;
+}
+
+.fullscreen-hud-action-btn.is-active {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+
+body.eink-mode .auto-flip-toggle-btn.is-active,
+body.eink-mode .fullscreen-hud-action-btn.is-active {
+  background: #000000;
+  color: #ffffff;
+  border-color: #000000;
+}
+
+.auto-flip-ghost-row {
+  margin-top: 0.65rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.auto-flip-ghost-presets {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.auto-flip-ghost-presets .segmented-btn {
+  padding: 0.3rem 0.1rem;
+  font-size: 0.71rem;
+}
+
+.manual-ghost-refresh-btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: 0.45rem;
+  padding: 0.34rem 0.6rem;
+  font-size: 0.76rem;
+}
+
+.eink-ghost-refresh-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  pointer-events: none;
+  transition: none !important;
+  animation: none !important;
+}
+
+.eink-ghost-refresh-overlay.phase-black {
+  display: block;
+  background: #000000;
+}
+
+.eink-ghost-refresh-overlay.phase-white {
+  display: block;
+  background: #ffffff;
+}
+
+
